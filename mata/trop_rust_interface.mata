@@ -422,6 +422,36 @@ real scalar trop_bootstrap_joint()
     return(_trop_call_plugin("bootstrap_joint"))
 }
 
+/*──────────────────────────────────────────────────────────────────────────────
+  trop_bootstrap_rao_wu_twostep()
+
+  Two-step Rao-Wu bootstrap variance estimation for survey data.
+  Uses the survey design matrices (__trop_strata, __trop_psu, __trop_fpc)
+  prepared by trop_prepare_survey_design().
+
+  Returns 0 on success.
+──────────────────────────────────────────────────────────────────────────────*/
+
+real scalar trop_bootstrap_rao_wu_twostep()
+{
+    return(_trop_call_plugin("bootstrap_rao_wu_twostep"))
+}
+
+/*──────────────────────────────────────────────────────────────────────────────
+  trop_bootstrap_rao_wu_joint()
+
+  Joint Rao-Wu bootstrap variance estimation for survey data.
+  Uses the survey design matrices (__trop_strata, __trop_psu, __trop_fpc)
+  prepared by trop_prepare_survey_design().
+
+  Returns 0 on success.
+──────────────────────────────────────────────────────────────────────────────*/
+
+real scalar trop_bootstrap_rao_wu_joint()
+{
+    return(_trop_call_plugin("bootstrap_rao_wu_joint"))
+}
+
 /* ═══════════════════════════════════════════════════════════════════════════
    5. Distance matrix
 
@@ -684,6 +714,7 @@ real scalar _trop_main(
     real scalar rc
     real scalar lambda_time, lambda_unit, lambda_nn
     real scalar max_iter, tol, seed, alpha_level, ddof_eff
+    real scalar has_survey
     string scalar joint_mode, twostep_mode
 
     /* ── plugin check ────────────────────────────────────────────────── */
@@ -747,8 +778,18 @@ real scalar _trop_main(
                 max_iter, tol)
         }
 
-        if (method == "twostep") rc = trop_bootstrap_twostep()
-        else rc = trop_bootstrap_joint()
+        /* Survey design branch: use Rao-Wu bootstrap when active */
+        has_survey = st_numscalar("__trop_has_survey_design")
+        if (has_survey >= .) has_survey = 0
+
+        if (has_survey == 1) {
+            if (method == "twostep") rc = trop_bootstrap_rao_wu_twostep()
+            else rc = trop_bootstrap_rao_wu_joint()
+        }
+        else {
+            if (method == "twostep") rc = trop_bootstrap_twostep()
+            else rc = trop_bootstrap_joint()
+        }
         if (rc != 0) return(rc)
     }
 

@@ -179,6 +179,7 @@ pub unsafe extern "C" fn stata_loocv_grid_search(
             lambda_nn_grid,
             max_iter as usize,
             tol,
+            None,
         );
 
         *best_lambda_time_out = best_time;
@@ -310,6 +311,7 @@ pub unsafe extern "C" fn stata_loocv_grid_search_exhaustive(
             lambda_nn_grid,
             max_iter as usize,
             tol,
+            None,
         );
 
         *best_lambda_time_out = best_time;
@@ -463,8 +465,10 @@ pub unsafe extern "C" fn stata_estimate_twostep(
                     tol,
                     None,
                     None,
+                    None,
+                    None,
                 ) {
-                    Some((alpha, beta, l, n_iters, did_converge)) => {
+                    Some((alpha, beta, l, n_iters, did_converge, _gamma)) => {
                         let tau = y[[*t, *i]] - alpha[*i] - beta[*t] - l[[*t, *i]];
                         Some(ObsResult {
                             tau,
@@ -650,6 +654,7 @@ pub unsafe extern "C" fn stata_bootstrap_trop_variance(
             seed,
             alpha_eff,
             ddof_u8,
+            None,
         );
 
         *se_out = result.se;
@@ -777,6 +782,7 @@ pub unsafe extern "C" fn stata_loocv_cycling_search_joint(
             max_iter as usize,
             tol,
             max_cycles as usize,
+            None,
         );
 
         *best_lambda_time_out = best_time;
@@ -913,6 +919,7 @@ pub unsafe extern "C" fn stata_loocv_grid_search_joint(
             lambda_nn_grid,
             max_iter as usize,
             tol,
+            None,
         );
 
         *best_lambda_time_out = best_time;
@@ -1026,8 +1033,8 @@ pub unsafe extern "C" fn stata_estimate_joint(
         // When λ_nn is large enough, skip the low-rank component entirely.
         // τ is post-hoc: mean residual over treated cells (L ≡ 0 here).
         let result = if ln_eff >= 1e10 {
-            estimation::solve_joint_no_lowrank(&y, &delta.view()).map(
-                |(mu, alpha, beta)| {
+            estimation::solve_joint_no_lowrank(&y, &delta.view(), None).map(
+                |(mu, alpha, beta, _gamma)| {
                     let mut tau_sum = 0.0_f64;
                     let mut tau_count = 0usize;
                     for t in 0..np {
@@ -1051,7 +1058,10 @@ pub unsafe extern "C" fn stata_estimate_joint(
                 ln_eff,
                 max_iter as usize,
                 tol,
-            )
+                None,
+            ).map(|(mu, alpha, beta, l, tau, n_iters, converged, _gamma)| {
+                (mu, alpha, beta, l, tau, n_iters, converged)
+            })
         };
 
         match result {
@@ -1190,6 +1200,7 @@ pub unsafe extern "C" fn stata_bootstrap_trop_variance_joint(
             seed,
             alpha_eff,
             ddof_u8,
+            None,
         );
 
         *se_out = result.se;
@@ -1332,8 +1343,10 @@ pub unsafe extern "C" fn stata_estimate_twostep_weighted(
                     tol,
                     None,
                     None,
+                    None,
+                    None,
                 ) {
-                    Some((alpha, beta, l, n_iters, did_converge)) => {
+                    Some((alpha, beta, l, n_iters, did_converge, _gamma)) => {
                         let tau = y[[*t, *i]] - alpha[*i] - beta[*t] - l[[*t, *i]];
                         Some(ObsResult {
                             tau,
@@ -1517,6 +1530,7 @@ pub unsafe extern "C" fn stata_bootstrap_trop_variance_weighted(
             alpha_eff,
             ddof_u8,
             unit_weights,
+            None,
         );
 
         *se_out = result.se;
@@ -1608,8 +1622,8 @@ pub unsafe extern "C" fn stata_estimate_joint_weighted(
         // post-hoc instead of the unweighted mean returned by the unweighted
         // path.
         let fit = if ln_eff >= 1e10 {
-            estimation::solve_joint_no_lowrank(&y, &delta.view()).map(
-                |(mu, alpha, beta)| {
+            estimation::solve_joint_no_lowrank(&y, &delta.view(), None).map(
+                |(mu, alpha, beta, _gamma)| {
                     let l = Array2::<f64>::zeros((np, nu));
                     (mu, alpha, beta, l, 1_usize, true)
                 },
@@ -1622,8 +1636,9 @@ pub unsafe extern "C" fn stata_estimate_joint_weighted(
                 ln_eff,
                 max_iter as usize,
                 tol,
+                None,
             )
-            .map(|(mu, alpha, beta, l, _tau, n_iters, did_converge)| {
+            .map(|(mu, alpha, beta, l, _tau, n_iters, did_converge, _gamma)| {
                 (mu, alpha, beta, l, n_iters, did_converge)
             })
         };
@@ -1750,6 +1765,232 @@ pub unsafe extern "C" fn stata_bootstrap_trop_variance_joint_weighted(
             alpha_eff,
             ddof_u8,
             unit_weights,
+            None,
+        );
+
+        *se_out = result.se;
+
+        if !ci_lower_out.is_null() {
+            *ci_lower_out = result.ci_lower;
+        }
+        if !ci_upper_out.is_null() {
+            *ci_upper_out = result.ci_upper;
+        }
+        if !n_valid_out.is_null() {
+            *n_valid_out = result.n_valid as i32;
+        }
+
+        if !estimates_ptr.is_null() {
+            let est_slice = slice::from_raw_parts_mut(estimates_ptr, result.estimates.len());
+            est_slice.copy_from_slice(&result.estimates);
+        }
+
+        TropError::Success.code()
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Rao-Wu survey bootstrap — C ABI exports
+// ---------------------------------------------------------------------------
+
+/// Rao-Wu bootstrap variance estimation for the Twostep method with complex
+/// survey design (strata, PSU, FPC).
+///
+/// Fits the model once, then for each bootstrap replicate rescales unit weights
+/// according to the Rao-Wu (1988) scheme and recomputes the weighted ATT.
+///
+/// # Safety
+/// All pointers must be non-null and point to properly sized buffers.
+/// `fpc_ptr` may be null if no finite population correction is applied.
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn stata_bootstrap_trop_variance_rao_wu(
+    y_ptr: *const f64,
+    d_ptr: *const f64,
+    control_mask_ptr: *const u8,
+    time_dist_ptr: *const i64,
+    n_periods: i32,
+    n_units: i32,
+    lambda_time: f64,
+    lambda_unit: f64,
+    lambda_nn: f64,
+    n_bootstrap: i32,
+    max_iter: i32,
+    tol: f64,
+    seed: u64,
+    alpha: f64,
+    ddof: i32,
+    strata_ptr: *const i64,
+    psu_ptr: *const i64,
+    fpc_ptr: *const f64,
+    unit_weights_ptr: *const f64,
+    estimates_ptr: *mut f64,
+    se_out: *mut f64,
+    ci_lower_out: *mut f64,
+    ci_upper_out: *mut f64,
+    n_valid_out: *mut i32,
+) -> i32 {
+    catch_panic!({
+        if y_ptr.is_null()
+            || d_ptr.is_null()
+            || control_mask_ptr.is_null()
+            || time_dist_ptr.is_null()
+            || strata_ptr.is_null()
+            || psu_ptr.is_null()
+            || unit_weights_ptr.is_null()
+            || se_out.is_null()
+        {
+            return TropError::NullPointer.code();
+        }
+
+        let np = n_periods as usize;
+        let nu = n_units as usize;
+
+        let y = ptr_to_array2(y_ptr, np, nu);
+        let d = ptr_to_array2(d_ptr, np, nu);
+        let control_mask = ptr_to_array2_u8(control_mask_ptr, np, nu);
+        let time_dist = ptr_to_array2_i64(time_dist_ptr, np, np);
+
+        let strata = slice::from_raw_parts(strata_ptr, nu);
+        let psu = slice::from_raw_parts(psu_ptr, nu);
+        let fpc: Option<&[f64]> = if fpc_ptr.is_null() {
+            None
+        } else {
+            Some(slice::from_raw_parts(fpc_ptr, nu))
+        };
+        let unit_weights = slice::from_raw_parts(unit_weights_ptr, nu);
+
+        let alpha_eff = if alpha <= 0.0 || alpha >= 1.0 { 0.05 } else { alpha };
+        let ddof_u8: u8 = if ddof == 0 { 0 } else { 1 };
+
+        let result = bootstrap::bootstrap_trop_variance_rao_wu(
+            &y,
+            &d,
+            &control_mask,
+            &time_dist,
+            lambda_time,
+            lambda_unit,
+            lambda_nn,
+            n_bootstrap as usize,
+            max_iter as usize,
+            tol,
+            seed,
+            alpha_eff,
+            ddof_u8,
+            strata,
+            psu,
+            fpc,
+            unit_weights,
+            None,
+        );
+
+        *se_out = result.se;
+
+        if !ci_lower_out.is_null() {
+            *ci_lower_out = result.ci_lower;
+        }
+        if !ci_upper_out.is_null() {
+            *ci_upper_out = result.ci_upper;
+        }
+        if !n_valid_out.is_null() {
+            *n_valid_out = result.n_valid as i32;
+        }
+
+        if !estimates_ptr.is_null() {
+            let est_slice = slice::from_raw_parts_mut(estimates_ptr, result.estimates.len());
+            est_slice.copy_from_slice(&result.estimates);
+        }
+
+        TropError::Success.code()
+    })
+}
+
+/// Rao-Wu bootstrap variance estimation for the Joint method with complex
+/// survey design (strata, PSU, FPC).
+///
+/// Fits the joint model once, then for each bootstrap replicate rescales unit
+/// weights according to the Rao-Wu (1988) scheme and recomputes the weighted ATT.
+///
+/// # Safety
+/// All pointers must be non-null and point to properly sized buffers.
+/// `fpc_ptr` may be null if no finite population correction is applied.
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn stata_bootstrap_trop_variance_rao_wu_joint(
+    y_ptr: *const f64,
+    d_ptr: *const f64,
+    n_periods: i32,
+    n_units: i32,
+    lambda_time: f64,
+    lambda_unit: f64,
+    lambda_nn: f64,
+    n_bootstrap: i32,
+    max_iter: i32,
+    tol: f64,
+    seed: u64,
+    alpha: f64,
+    ddof: i32,
+    strata_ptr: *const i64,
+    psu_ptr: *const i64,
+    fpc_ptr: *const f64,
+    unit_weights_ptr: *const f64,
+    estimates_ptr: *mut f64,
+    se_out: *mut f64,
+    ci_lower_out: *mut f64,
+    ci_upper_out: *mut f64,
+    n_valid_out: *mut i32,
+) -> i32 {
+    catch_panic!({
+        if y_ptr.is_null()
+            || d_ptr.is_null()
+            || strata_ptr.is_null()
+            || psu_ptr.is_null()
+            || unit_weights_ptr.is_null()
+            || se_out.is_null()
+        {
+            return TropError::NullPointer.code();
+        }
+
+        let np = n_periods as usize;
+        let nu = n_units as usize;
+
+        let y = ptr_to_array2(y_ptr, np, nu);
+        let d = ptr_to_array2(d_ptr, np, nu);
+
+        // Joint bootstrap requires simultaneous adoption.
+        if let Err(err) = loocv::check_simultaneous_adoption(&d) {
+            return err.code();
+        }
+
+        let strata = slice::from_raw_parts(strata_ptr, nu);
+        let psu = slice::from_raw_parts(psu_ptr, nu);
+        let fpc: Option<&[f64]> = if fpc_ptr.is_null() {
+            None
+        } else {
+            Some(slice::from_raw_parts(fpc_ptr, nu))
+        };
+        let unit_weights = slice::from_raw_parts(unit_weights_ptr, nu);
+
+        let alpha_eff = if alpha <= 0.0 || alpha >= 1.0 { 0.05 } else { alpha };
+        let ddof_u8: u8 = if ddof == 0 { 0 } else { 1 };
+
+        let result = bootstrap::bootstrap_trop_variance_rao_wu_joint(
+            &y,
+            &d,
+            lambda_time,
+            lambda_unit,
+            lambda_nn,
+            n_bootstrap as usize,
+            max_iter as usize,
+            tol,
+            seed,
+            alpha_eff,
+            ddof_u8,
+            strata,
+            psu,
+            fpc,
+            unit_weights,
+            None,
         );
 
         *se_out = result.se;
@@ -1941,6 +2182,860 @@ pub unsafe extern "C" fn stata_compute_joint_weight_vectors(
 
         let du_slice = slice::from_raw_parts_mut(delta_unit_out, nu);
         du_slice.copy_from_slice(delta_unit.as_slice().unwrap());
+
+        TropError::Success.code()
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Covariate-aware variants — C ABI exports
+//
+// These variants accept an additional X matrix (T*N × p, column-major) and
+// pass it through to the internal estimation/loocv/bootstrap functions.
+// The non-covariate entry points remain unchanged (backward-compatible).
+// ---------------------------------------------------------------------------
+
+/// Helper: convert a column-major X pointer into a row-major Array2<f64>.
+///
+/// Stata sends X as column-major (n_obs × p) where n_obs = n_periods * n_units.
+/// Internally Rust expects row-major with row index = t * n_units + i.
+#[inline]
+unsafe fn ptr_to_x_matrix(
+    x_ptr: *const f64,
+    n_periods: usize,
+    n_units: usize,
+    n_covariates: usize,
+) -> Option<Array2<f64>> {
+    if n_covariates == 0 || x_ptr.is_null() {
+        return None;
+    }
+    let n_obs = n_periods * n_units;
+    let p = n_covariates;
+    let x_slice = slice::from_raw_parts(x_ptr, n_obs * p);
+    let mut x_arr = Array2::<f64>::zeros((n_obs, p));
+    for col in 0..p {
+        for row in 0..n_obs {
+            x_arr[[row, col]] = x_slice[row + col * n_obs];
+        }
+    }
+    Some(x_arr)
+}
+
+/// LOOCV grid search for Twostep with covariates.
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn stata_loocv_grid_search_with_covariates(
+    y_ptr: *const f64,
+    d_ptr: *const f64,
+    control_mask_ptr: *const u8,
+    time_dist_ptr: *const i64,
+    n_periods: i32,
+    n_units: i32,
+    lambda_time_grid_ptr: *const f64,
+    lambda_time_grid_len: i32,
+    lambda_unit_grid_ptr: *const f64,
+    lambda_unit_grid_len: i32,
+    lambda_nn_grid_ptr: *const f64,
+    lambda_nn_grid_len: i32,
+    max_iter: i32,
+    tol: f64,
+    best_lambda_time_out: *mut f64,
+    best_lambda_unit_out: *mut f64,
+    best_lambda_nn_out: *mut f64,
+    best_score_out: *mut f64,
+    n_valid_out: *mut i32,
+    n_attempted_out: *mut i32,
+    first_failed_t_out: *mut i32,
+    first_failed_i_out: *mut i32,
+    stage1_lambda_time_out: *mut f64,
+    stage1_lambda_unit_out: *mut f64,
+    stage1_lambda_nn_out: *mut f64,
+    x_ptr: *const f64,
+    n_covariates: i32,
+) -> i32 {
+    catch_panic!({
+        if y_ptr.is_null()
+            || d_ptr.is_null()
+            || control_mask_ptr.is_null()
+            || time_dist_ptr.is_null()
+            || lambda_time_grid_ptr.is_null()
+            || lambda_unit_grid_ptr.is_null()
+            || lambda_nn_grid_ptr.is_null()
+            || best_lambda_time_out.is_null()
+            || best_lambda_unit_out.is_null()
+            || best_lambda_nn_out.is_null()
+            || best_score_out.is_null()
+        {
+            return TropError::NullPointer.code();
+        }
+
+        if n_covariates > 0 && x_ptr.is_null() {
+            return TropError::NullPointer.code();
+        }
+
+        let np = n_periods as usize;
+        let nu = n_units as usize;
+
+        let y = ptr_to_array2(y_ptr, np, nu);
+        let d = ptr_to_array2(d_ptr, np, nu);
+        let control_mask = ptr_to_array2_u8(control_mask_ptr, np, nu);
+        let time_dist = ptr_to_array2_i64(time_dist_ptr, np, np);
+
+        let lambda_time_grid =
+            slice::from_raw_parts(lambda_time_grid_ptr, lambda_time_grid_len as usize);
+        let lambda_unit_grid =
+            slice::from_raw_parts(lambda_unit_grid_ptr, lambda_unit_grid_len as usize);
+        let lambda_nn_grid = slice::from_raw_parts(lambda_nn_grid_ptr, lambda_nn_grid_len as usize);
+
+        let x_opt = ptr_to_x_matrix(x_ptr, np, nu, n_covariates as usize);
+        let x_view = x_opt.as_ref().map(|a| a.view());
+
+        let (
+            (
+                best_time,
+                best_unit,
+                best_nn,
+                best_score,
+                n_valid,
+                n_attempted,
+                first_failed,
+            ),
+            stage1_time,
+            stage1_unit,
+            stage1_nn,
+        ) = loocv::loocv_grid_search_with_stage1(
+            &y,
+            &d,
+            &control_mask,
+            &time_dist,
+            lambda_time_grid,
+            lambda_unit_grid,
+            lambda_nn_grid,
+            max_iter as usize,
+            tol,
+            x_view.as_ref(),
+        );
+
+        *best_lambda_time_out = best_time;
+        *best_lambda_unit_out = best_unit;
+        *best_lambda_nn_out = best_nn;
+        *best_score_out = best_score;
+
+        if !n_valid_out.is_null() {
+            *n_valid_out = n_valid as i32;
+        }
+        if !n_attempted_out.is_null() {
+            *n_attempted_out = n_attempted as i32;
+        }
+        if !first_failed_t_out.is_null() {
+            *first_failed_t_out = match first_failed {
+                Some((t, _)) => t as i32,
+                None => -1,
+            };
+        }
+        if !first_failed_i_out.is_null() {
+            *first_failed_i_out = match first_failed {
+                Some((_, i)) => i as i32,
+                None => -1,
+            };
+        }
+        if !stage1_lambda_time_out.is_null() {
+            *stage1_lambda_time_out = stage1_time;
+        }
+        if !stage1_lambda_unit_out.is_null() {
+            *stage1_lambda_unit_out = stage1_unit;
+        }
+        if !stage1_lambda_nn_out.is_null() {
+            *stage1_lambda_nn_out = stage1_nn;
+        }
+
+        TropError::Success.code()
+    })
+}
+
+/// Exhaustive LOOCV grid search for Twostep with covariates.
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn stata_loocv_grid_search_exhaustive_with_covariates(
+    y_ptr: *const f64,
+    d_ptr: *const f64,
+    control_mask_ptr: *const u8,
+    time_dist_ptr: *const i64,
+    n_periods: i32,
+    n_units: i32,
+    lambda_time_grid_ptr: *const f64,
+    lambda_time_grid_len: i32,
+    lambda_unit_grid_ptr: *const f64,
+    lambda_unit_grid_len: i32,
+    lambda_nn_grid_ptr: *const f64,
+    lambda_nn_grid_len: i32,
+    max_iter: i32,
+    tol: f64,
+    best_lambda_time_out: *mut f64,
+    best_lambda_unit_out: *mut f64,
+    best_lambda_nn_out: *mut f64,
+    best_score_out: *mut f64,
+    n_valid_out: *mut i32,
+    n_attempted_out: *mut i32,
+    first_failed_t_out: *mut i32,
+    first_failed_i_out: *mut i32,
+    x_ptr: *const f64,
+    n_covariates: i32,
+) -> i32 {
+    catch_panic!({
+        if y_ptr.is_null()
+            || d_ptr.is_null()
+            || control_mask_ptr.is_null()
+            || time_dist_ptr.is_null()
+            || lambda_time_grid_ptr.is_null()
+            || lambda_unit_grid_ptr.is_null()
+            || lambda_nn_grid_ptr.is_null()
+            || best_lambda_time_out.is_null()
+            || best_lambda_unit_out.is_null()
+            || best_lambda_nn_out.is_null()
+            || best_score_out.is_null()
+        {
+            return TropError::NullPointer.code();
+        }
+
+        if n_covariates > 0 && x_ptr.is_null() {
+            return TropError::NullPointer.code();
+        }
+
+        let np = n_periods as usize;
+        let nu = n_units as usize;
+
+        let y = ptr_to_array2(y_ptr, np, nu);
+        let d = ptr_to_array2(d_ptr, np, nu);
+        let control_mask = ptr_to_array2_u8(control_mask_ptr, np, nu);
+        let time_dist = ptr_to_array2_i64(time_dist_ptr, np, np);
+
+        let lambda_time_grid =
+            slice::from_raw_parts(lambda_time_grid_ptr, lambda_time_grid_len as usize);
+        let lambda_unit_grid =
+            slice::from_raw_parts(lambda_unit_grid_ptr, lambda_unit_grid_len as usize);
+        let lambda_nn_grid = slice::from_raw_parts(lambda_nn_grid_ptr, lambda_nn_grid_len as usize);
+
+        let x_opt = ptr_to_x_matrix(x_ptr, np, nu, n_covariates as usize);
+        let x_view = x_opt.as_ref().map(|a| a.view());
+
+        let (
+            best_time,
+            best_unit,
+            best_nn,
+            best_score,
+            n_valid,
+            n_attempted,
+            first_failed,
+        ) = loocv::loocv_grid_search_exhaustive(
+            &y,
+            &d,
+            &control_mask,
+            &time_dist,
+            lambda_time_grid,
+            lambda_unit_grid,
+            lambda_nn_grid,
+            max_iter as usize,
+            tol,
+            x_view.as_ref(),
+        );
+
+        *best_lambda_time_out = best_time;
+        *best_lambda_unit_out = best_unit;
+        *best_lambda_nn_out = best_nn;
+        *best_score_out = best_score;
+
+        if !n_valid_out.is_null() {
+            *n_valid_out = n_valid as i32;
+        }
+        if !n_attempted_out.is_null() {
+            *n_attempted_out = n_attempted as i32;
+        }
+        if !first_failed_t_out.is_null() {
+            *first_failed_t_out = match first_failed {
+                Some((t, _)) => t as i32,
+                None => -1,
+            };
+        }
+        if !first_failed_i_out.is_null() {
+            *first_failed_i_out = match first_failed {
+                Some((_, i)) => i as i32,
+                None => -1,
+            };
+        }
+
+        TropError::Success.code()
+    })
+}
+
+/// Twostep point estimation with covariates.
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn stata_estimate_twostep_with_covariates(
+    y_ptr: *const f64,
+    d_ptr: *const f64,
+    control_mask_ptr: *const u8,
+    time_dist_ptr: *const i64,
+    n_periods: i32,
+    n_units: i32,
+    lambda_time: f64,
+    lambda_unit: f64,
+    lambda_nn: f64,
+    max_iter: i32,
+    tol: f64,
+    att_out: *mut f64,
+    tau_ptr: *mut f64,
+    alpha_ptr: *mut f64,
+    beta_ptr: *mut f64,
+    l_ptr: *mut f64,
+    n_treated_out: *mut i32,
+    n_iterations_out: *mut i32,
+    converged_out: *mut i32,
+    converged_by_obs_ptr: *mut i32,
+    n_iters_by_obs_ptr: *mut i32,
+    x_ptr: *const f64,
+    n_covariates: i32,
+    gamma_out: *mut f64,
+) -> i32 {
+    catch_panic!({
+        if y_ptr.is_null()
+            || d_ptr.is_null()
+            || control_mask_ptr.is_null()
+            || time_dist_ptr.is_null()
+            || att_out.is_null()
+        {
+            return TropError::NullPointer.code();
+        }
+
+        if n_covariates > 0 && x_ptr.is_null() {
+            return TropError::NullPointer.code();
+        }
+
+        let np = n_periods as usize;
+        let nu = n_units as usize;
+        let p = n_covariates as usize;
+
+        let y = ptr_to_array2(y_ptr, np, nu);
+        let d = ptr_to_array2(d_ptr, np, nu);
+        let control_mask = ptr_to_array2_u8(control_mask_ptr, np, nu);
+        let time_dist = ptr_to_array2_i64(time_dist_ptr, np, np);
+
+        let x_opt = ptr_to_x_matrix(x_ptr, np, nu, p);
+        let x_view = x_opt.as_ref().map(|a| a.view());
+
+        let mut treated_obs: Vec<(usize, usize)> = Vec::new();
+        for t in 0..np {
+            for i in 0..nu {
+                if d[[t, i]] == 1.0 {
+                    treated_obs.push((t, i));
+                }
+            }
+        }
+
+        if treated_obs.is_empty() {
+            return TropError::NoTreated.code();
+        }
+
+        let lt_eff = if lambda_time.is_infinite() { 0.0 } else { lambda_time };
+        let lu_eff = if lambda_unit.is_infinite() { 0.0 } else { lambda_unit };
+        let ln_eff = if lambda_nn.is_infinite() { 1e10 } else { lambda_nn };
+
+        struct ObsResult {
+            tau: f64,
+            alpha: Array1<f64>,
+            beta: Array1<f64>,
+            l: Array2<f64>,
+            n_iters: usize,
+            converged: bool,
+            gamma: Option<Array1<f64>>,
+        }
+
+        let dist_cache = distance::UnitDistanceCache::build(&y, &d);
+
+        let obs_results: Vec<Option<ObsResult>> = treated_obs
+            .par_iter()
+            .map(|(t, i)| {
+                let weight_matrix = weights::compute_weight_matrix_cached(
+                    &y, &d, &dist_cache, np, nu, *i, *t, lt_eff, lu_eff, &time_dist,
+                );
+
+                match estimation::estimate_model(
+                    &y,
+                    &control_mask,
+                    &weight_matrix.view(),
+                    ln_eff,
+                    np,
+                    nu,
+                    max_iter as usize,
+                    tol,
+                    None,
+                    None,
+                    x_view.as_ref(),
+                    None,
+                ) {
+                    Some((alpha, beta, l, n_iters, did_converge, gamma)) => {
+                        let x_gamma = match (&gamma, &x_view) {
+                            (Some(g), Some(xm)) => {
+                                let obs_idx = *t * nu + *i;
+                                xm.row(obs_idx).dot(g)
+                            }
+                            _ => 0.0,
+                        };
+                        let tau = y[[*t, *i]] - alpha[*i] - beta[*t] - l[[*t, *i]] - x_gamma;
+                        Some(ObsResult {
+                            tau,
+                            alpha,
+                            beta,
+                            l,
+                            n_iters,
+                            converged: did_converge,
+                            gamma,
+                        })
+                    }
+                    None => None,
+                }
+            })
+            .collect();
+
+        let mut tau_values: Vec<f64> = Vec::with_capacity(treated_obs.len());
+        let mut alpha_sum = Array1::<f64>::zeros(nu);
+        let mut beta_sum = Array1::<f64>::zeros(np);
+        let mut l_sum = Array2::<f64>::zeros((np, nu));
+        let mut gamma_sum: Option<Array1<f64>> = if p > 0 { Some(Array1::zeros(p)) } else { None };
+        let mut n_successful: usize = 0;
+        let mut max_iters: usize = 0;
+        let mut all_successful_converged = true;
+        let mut converged_by_obs: Vec<i32> = Vec::with_capacity(treated_obs.len());
+        let mut n_iters_by_obs: Vec<i32> = Vec::with_capacity(treated_obs.len());
+
+        for result in obs_results {
+            match result {
+                Some(obs) => {
+                    tau_values.push(obs.tau);
+                    alpha_sum += &obs.alpha;
+                    beta_sum += &obs.beta;
+                    l_sum += &obs.l;
+                    if let (Some(ref mut gs), Some(ref g)) = (&mut gamma_sum, &obs.gamma) {
+                        *gs += g;
+                    }
+                    n_successful += 1;
+                    if obs.n_iters > max_iters {
+                        max_iters = obs.n_iters;
+                    }
+                    if !obs.converged {
+                        all_successful_converged = false;
+                    }
+                    converged_by_obs.push(if obs.converged { 1 } else { 0 });
+                    n_iters_by_obs.push(obs.n_iters as i32);
+                }
+                None => {
+                    converged_by_obs.push(-1);
+                    n_iters_by_obs.push(-1);
+                }
+            }
+        }
+
+        if tau_values.is_empty() {
+            return TropError::Convergence.code();
+        }
+
+        let att = tau_values.iter().sum::<f64>() / tau_values.len() as f64;
+
+        let n_succ_f64 = n_successful as f64;
+        let all_alpha = alpha_sum / n_succ_f64;
+        let all_beta = beta_sum / n_succ_f64;
+        let all_l = l_sum / n_succ_f64;
+
+        *att_out = att;
+        *n_treated_out = tau_values.len() as i32;
+        *n_iterations_out = max_iters as i32;
+        *converged_out = if all_successful_converged { 1 } else { 0 };
+
+        if !converged_by_obs_ptr.is_null() {
+            let slot = slice::from_raw_parts_mut(converged_by_obs_ptr, converged_by_obs.len());
+            slot.copy_from_slice(&converged_by_obs);
+        }
+        if !n_iters_by_obs_ptr.is_null() {
+            let slot = slice::from_raw_parts_mut(n_iters_by_obs_ptr, n_iters_by_obs.len());
+            slot.copy_from_slice(&n_iters_by_obs);
+        }
+
+        if !tau_ptr.is_null() {
+            let tau_slice = slice::from_raw_parts_mut(tau_ptr, tau_values.len());
+            tau_slice.copy_from_slice(&tau_values);
+        }
+
+        if !alpha_ptr.is_null() {
+            let alpha_slice = slice::from_raw_parts_mut(alpha_ptr, nu);
+            alpha_slice.copy_from_slice(all_alpha.as_slice().unwrap());
+        }
+
+        if !beta_ptr.is_null() {
+            let beta_slice = slice::from_raw_parts_mut(beta_ptr, np);
+            beta_slice.copy_from_slice(all_beta.as_slice().unwrap());
+        }
+
+        if !l_ptr.is_null() {
+            array2_to_ptr(&all_l, l_ptr);
+        }
+
+        // Write averaged gamma to output buffer.
+        if !gamma_out.is_null() && p > 0 {
+            if let Some(ref gs) = gamma_sum {
+                let avg_gamma = gs / n_succ_f64;
+                let gamma_slice = slice::from_raw_parts_mut(gamma_out, p);
+                for j in 0..p {
+                    gamma_slice[j] = avg_gamma[j];
+                }
+            }
+        }
+
+        TropError::Success.code()
+    })
+}
+
+/// Bootstrap variance estimation for Twostep with covariates.
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn stata_bootstrap_trop_variance_with_covariates(
+    y_ptr: *const f64,
+    d_ptr: *const f64,
+    control_mask_ptr: *const u8,
+    time_dist_ptr: *const i64,
+    n_periods: i32,
+    n_units: i32,
+    lambda_time: f64,
+    lambda_unit: f64,
+    lambda_nn: f64,
+    n_bootstrap: i32,
+    max_iter: i32,
+    tol: f64,
+    seed: u64,
+    alpha: f64,
+    ddof: i32,
+    estimates_ptr: *mut f64,
+    se_out: *mut f64,
+    ci_lower_out: *mut f64,
+    ci_upper_out: *mut f64,
+    n_valid_out: *mut i32,
+    x_ptr: *const f64,
+    n_covariates: i32,
+) -> i32 {
+    catch_panic!({
+        if y_ptr.is_null()
+            || d_ptr.is_null()
+            || control_mask_ptr.is_null()
+            || time_dist_ptr.is_null()
+            || se_out.is_null()
+        {
+            return TropError::NullPointer.code();
+        }
+
+        if n_covariates > 0 && x_ptr.is_null() {
+            return TropError::NullPointer.code();
+        }
+
+        let np = n_periods as usize;
+        let nu = n_units as usize;
+
+        let y = ptr_to_array2(y_ptr, np, nu);
+        let d = ptr_to_array2(d_ptr, np, nu);
+        let control_mask = ptr_to_array2_u8(control_mask_ptr, np, nu);
+        let time_dist = ptr_to_array2_i64(time_dist_ptr, np, np);
+
+        let x_opt = ptr_to_x_matrix(x_ptr, np, nu, n_covariates as usize);
+        let x_view = x_opt.as_ref().map(|a| a.view());
+
+        let alpha_eff = if alpha <= 0.0 || alpha >= 1.0 { 0.05 } else { alpha };
+        let ddof_u8: u8 = if ddof == 0 { 0 } else { 1 };
+
+        let result = bootstrap::bootstrap_trop_variance_full(
+            &y,
+            &d,
+            &control_mask,
+            &time_dist,
+            lambda_time,
+            lambda_unit,
+            lambda_nn,
+            n_bootstrap as usize,
+            max_iter as usize,
+            tol,
+            seed,
+            alpha_eff,
+            ddof_u8,
+            x_view.as_ref(),
+        );
+
+        *se_out = result.se;
+
+        if !ci_lower_out.is_null() {
+            *ci_lower_out = result.ci_lower;
+        }
+        if !ci_upper_out.is_null() {
+            *ci_upper_out = result.ci_upper;
+        }
+        if !n_valid_out.is_null() {
+            *n_valid_out = result.n_valid as i32;
+        }
+
+        if !estimates_ptr.is_null() {
+            let est_slice = slice::from_raw_parts_mut(estimates_ptr, result.estimates.len());
+            est_slice.copy_from_slice(&result.estimates);
+        }
+
+        TropError::Success.code()
+    })
+}
+
+/// Joint point estimation with covariates.
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn stata_estimate_joint_with_covariates(
+    y_ptr: *const f64,
+    d_ptr: *const f64,
+    n_periods: i32,
+    n_units: i32,
+    lambda_time: f64,
+    lambda_unit: f64,
+    lambda_nn: f64,
+    max_iter: i32,
+    tol: f64,
+    tau_out: *mut f64,
+    mu_out: *mut f64,
+    alpha_ptr: *mut f64,
+    beta_ptr: *mut f64,
+    l_ptr: *mut f64,
+    n_iterations_out: *mut i32,
+    converged_out: *mut i32,
+    tau_vec_ptr: *mut f64,
+    n_treated_out: *mut i32,
+    x_ptr: *const f64,
+    n_covariates: i32,
+    gamma_out: *mut f64,
+) -> i32 {
+    catch_panic!({
+        if y_ptr.is_null() || d_ptr.is_null() || tau_out.is_null() || mu_out.is_null() {
+            return TropError::NullPointer.code();
+        }
+
+        if n_covariates > 0 && x_ptr.is_null() {
+            return TropError::NullPointer.code();
+        }
+
+        let np = n_periods as usize;
+        let nu = n_units as usize;
+        let p = n_covariates as usize;
+
+        let y = ptr_to_array2(y_ptr, np, nu);
+        let d = ptr_to_array2(d_ptr, np, nu);
+
+        let x_opt = ptr_to_x_matrix(x_ptr, np, nu, p);
+        let x_view = x_opt.as_ref().map(|a| a.view());
+
+        let lt_eff = if lambda_time.is_infinite() { 0.0 } else { lambda_time };
+        let lu_eff = if lambda_unit.is_infinite() { 0.0 } else { lambda_unit };
+        let ln_eff = if lambda_nn.is_infinite() { 1e10 } else { lambda_nn };
+
+        let treated_periods = match loocv::check_simultaneous_adoption(&d) {
+            Ok(tp) => tp,
+            Err(err) => return err.code(),
+        };
+
+        let delta = weights::compute_joint_weights(&y, &d, lt_eff, lu_eff, treated_periods);
+
+        estimation::debug_assert_delta_is_1minus_d_masked(
+            &d, &delta.view(), "stata_estimate_joint_with_covariates/delta",
+        );
+
+        let result = if ln_eff >= 1e10 {
+            estimation::solve_joint_no_lowrank(&y, &delta.view(), x_view.as_ref()).map(
+                |(mu, alpha, beta, gamma)| {
+                    let mut tau_sum = 0.0_f64;
+                    let mut tau_count = 0usize;
+                    for t in 0..np {
+                        for i in 0..nu {
+                            if d[[t, i]] == 1.0 && y[[t, i]].is_finite() {
+                                let x_gamma_val = match (&gamma, &x_view) {
+                                    (Some(g), Some(xm)) => {
+                                        let obs_idx = t * nu + i;
+                                        xm.row(obs_idx).dot(g)
+                                    }
+                                    _ => 0.0,
+                                };
+                                tau_sum += y[[t, i]] - mu - alpha[i] - beta[t] - x_gamma_val;
+                                tau_count += 1;
+                            }
+                        }
+                    }
+                    let tau = if tau_count > 0 { tau_sum / tau_count as f64 } else { 0.0 };
+                    let l = Array2::<f64>::zeros((np, nu));
+                    (mu, alpha, beta, l, tau, 1_usize, true, gamma)
+                },
+            )
+        } else {
+            estimation::solve_joint_with_lowrank(
+                &y,
+                &d,
+                &delta.view(),
+                ln_eff,
+                max_iter as usize,
+                tol,
+                x_view.as_ref(),
+            )
+        };
+
+        match result {
+            Some((mu, alpha, beta, l, tau, n_iters, did_converge, gamma)) => {
+                *tau_out = tau;
+                *mu_out = mu;
+                *n_iterations_out = n_iters as i32;
+                *converged_out = if did_converge { 1 } else { 0 };
+
+                if !alpha_ptr.is_null() {
+                    let alpha_slice = slice::from_raw_parts_mut(alpha_ptr, nu);
+                    alpha_slice.copy_from_slice(alpha.as_slice().unwrap());
+                }
+                if !beta_ptr.is_null() {
+                    let beta_slice = slice::from_raw_parts_mut(beta_ptr, np);
+                    beta_slice.copy_from_slice(beta.as_slice().unwrap());
+                }
+                if !l_ptr.is_null() {
+                    array2_to_ptr(&l, l_ptr);
+                }
+
+                let mut n_treated_cells: i32 = 0;
+                if !tau_vec_ptr.is_null() {
+                    let mut tau_values: Vec<f64> = Vec::new();
+                    for t in 0..np {
+                        for i in 0..nu {
+                            if d[[t, i]] == 1.0 && y[[t, i]].is_finite() {
+                                let x_gamma_val = match (&gamma, &x_view) {
+                                    (Some(g), Some(xm)) => {
+                                        let obs_idx = t * nu + i;
+                                        xm.row(obs_idx).dot(g)
+                                    }
+                                    _ => 0.0,
+                                };
+                                tau_values.push(
+                                    y[[t, i]] - mu - alpha[i] - beta[t] - l[[t, i]] - x_gamma_val,
+                                );
+                            }
+                        }
+                    }
+                    n_treated_cells = tau_values.len() as i32;
+                    let tau_slice = slice::from_raw_parts_mut(tau_vec_ptr, tau_values.len());
+                    tau_slice.copy_from_slice(&tau_values);
+                } else {
+                    for t in 0..np {
+                        for i in 0..nu {
+                            if d[[t, i]] == 1.0 && y[[t, i]].is_finite() {
+                                n_treated_cells += 1;
+                            }
+                        }
+                    }
+                }
+                if !n_treated_out.is_null() {
+                    *n_treated_out = n_treated_cells;
+                }
+
+                // Write gamma to output buffer.
+                if !gamma_out.is_null() && p > 0 {
+                    if let Some(ref g) = gamma {
+                        let gamma_slice = slice::from_raw_parts_mut(gamma_out, p);
+                        for j in 0..p {
+                            gamma_slice[j] = g[j];
+                        }
+                    }
+                }
+
+                TropError::Success.code()
+            }
+            None => TropError::Convergence.code(),
+        }
+    })
+}
+
+/// Bootstrap variance estimation for Joint with covariates.
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn stata_bootstrap_trop_variance_joint_with_covariates(
+    y_ptr: *const f64,
+    d_ptr: *const f64,
+    n_periods: i32,
+    n_units: i32,
+    lambda_time: f64,
+    lambda_unit: f64,
+    lambda_nn: f64,
+    n_bootstrap: i32,
+    max_iter: i32,
+    tol: f64,
+    seed: u64,
+    alpha: f64,
+    ddof: i32,
+    estimates_ptr: *mut f64,
+    se_out: *mut f64,
+    ci_lower_out: *mut f64,
+    ci_upper_out: *mut f64,
+    n_valid_out: *mut i32,
+    x_ptr: *const f64,
+    n_covariates: i32,
+) -> i32 {
+    catch_panic!({
+        if y_ptr.is_null() || d_ptr.is_null() || se_out.is_null() {
+            return TropError::NullPointer.code();
+        }
+
+        if n_covariates > 0 && x_ptr.is_null() {
+            return TropError::NullPointer.code();
+        }
+
+        let np = n_periods as usize;
+        let nu = n_units as usize;
+
+        let y = ptr_to_array2(y_ptr, np, nu);
+        let d = ptr_to_array2(d_ptr, np, nu);
+
+        if let Err(err) = loocv::check_simultaneous_adoption(&d) {
+            return err.code();
+        }
+
+        let x_opt = ptr_to_x_matrix(x_ptr, np, nu, n_covariates as usize);
+        let x_view = x_opt.as_ref().map(|a| a.view());
+
+        let alpha_eff = if alpha <= 0.0 || alpha >= 1.0 { 0.05 } else { alpha };
+        let ddof_u8: u8 = if ddof == 0 { 0 } else { 1 };
+
+        let result = bootstrap::bootstrap_trop_variance_joint_full(
+            &y,
+            &d,
+            lambda_time,
+            lambda_unit,
+            lambda_nn,
+            n_bootstrap as usize,
+            max_iter as usize,
+            tol,
+            seed,
+            alpha_eff,
+            ddof_u8,
+            x_view.as_ref(),
+        );
+
+        *se_out = result.se;
+
+        if !ci_lower_out.is_null() {
+            *ci_lower_out = result.ci_lower;
+        }
+        if !ci_upper_out.is_null() {
+            *ci_upper_out = result.ci_upper;
+        }
+        if !n_valid_out.is_null() {
+            *n_valid_out = result.n_valid as i32;
+        }
+
+        if !estimates_ptr.is_null() {
+            let est_slice = slice::from_raw_parts_mut(estimates_ptr, result.estimates.len());
+            est_slice.copy_from_slice(&result.estimates);
+        }
 
         TropError::Success.code()
     })

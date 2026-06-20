@@ -30,7 +30,7 @@ program trop_bootstrap, eclass
         [Level(real -1)]         /// confidence level in percent (10–99.99)
         [BSalpha(real -1)]       /// significance level alpha (deprecated)
         [SEED(integer 42)]       /// random-number seed
-        [MAXiter(integer 100)]   /// maximum iterations per replication
+        [MAXiter(integer 500)]   /// maximum iterations per replication
         [TOL(real 1e-6)]         /// convergence tolerance per replication
         [BSVARiance(string)]     /// variance denominator: "sample" (1/(B-1), default) or "paper" (1/B, Alg 3)
         [CImethod(string)]       /// primary CI: "percentile" (default), "t", or "normal"

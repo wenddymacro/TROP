@@ -320,7 +320,7 @@ Treatment Effect (ATT):
 > stable to the third decimal place. For faster and fully-converged estimates,
 > either (i) increase `lambda_nn` (e.g. `fixedlambda(0.4 0.3 0.1)` converges in
 > about 110 iterations to τ = -0.006672) or (ii) relax the tolerance via
-> `tol(1e-4)`. The ATT matches the reference implementation to `|Δτ| < 4e-7`.
+> `tol(1e-4)`. The ATT is stable to `|Δτ| < 4e-7` against the released numerical baseline.
 
 **Available datasets** (download via `net get trop`):
 
@@ -740,14 +740,18 @@ is pinned by a regression test so future refactors cannot silently
 regress, and each is motivated by a first-principles concern rather
 than personal preference:
 
-1. **Adaptive FISTA restart** (`rust/src/estimation.rs`).  The
-   nuclear-norm proximal solver uses the monotone gradient-restart
-   scheme of O'Donoghue & Candès (2015).  Plain FISTA can oscillate
-   when `lambda_nn` sits close to the soft-threshold boundary (for
-   example `lambda_nn ∈ {0.006, 0.011}`); the restart criterion
-   `⟨y_k − x_k, x_k − x_{k−1}⟩ > 0` signals that momentum has
-   overshot the optimum and resets `t_FISTA = 1` without changing the
-   fixed point.  Pinned by `tests/test_fista_restart_stability.do`.
+1. **FISTA adaptive restart disabled** (`rust/src/estimation.rs`).  The
+   nuclear-norm proximal solver does **not** use the monotone
+   gradient-restart scheme of O'Donoghue & Candès (2015).  Although
+   the restart criterion
+   `⟨y_k − x_k, x_k − x_{k−1}⟩ > 0` can eliminate momentum
+   oscillations in theory, it fires too aggressively on small panels
+   and prevents convergence.  The reference Python implementation
+   (`diff-diff` v3.1.1) does not use restart either, so we disable it
+   to maintain numerical consistency.  The test
+   `tests/test_fista_restart_stability.do` verifies that the FISTA
+   solver remains stable across a range of `lambda_nn` values without
+   restart.
 
 2. **LAPACK `dgelsd` for the weighted least-squares step**
    (`rust/src/estimation.rs`).  The SVD-based minimum-norm solver

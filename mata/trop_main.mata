@@ -30,8 +30,13 @@ mata set matastrict on
     panel_idx_var    -- unit (panel) identifier, i = 1,...,N
     time_idx_var     -- time period identifier, t = 1,...,T
     touse_var        -- estimation-sample marker
-    method           -- "twostep" (per-observation tau_{it}) or
-                        "joint" (pooled weighted least squares)
+    method           -- "twostep" (per-observation tau_{it}, paper
+                        Algorithm 2 / Eq. 13) or
+                        "joint" (pooled weighted least squares; paper
+                        Remark 6.1 homogeneous-tau aggregation; the
+                        delta_time / delta_unit kernels are engineering
+                        choices not prescribed by Remark 6.1, see
+                        rust/src/weights.rs::compute_joint_weights)
     lambda_time_user -- fixed lambda_time; missing triggers LOOCV selection
     lambda_unit_user -- fixed lambda_unit; missing triggers LOOCV selection
     lambda_nn_user   -- fixed lambda_nn (nuclear-norm penalty); missing
@@ -44,7 +49,7 @@ mata set matastrict on
     verbose          -- verbosity level (0 = silent)
 
   Optional arguments
-    max_iter_user      -- iteration limit for the SVD solver (default 100)
+    max_iter_user      -- iteration limit for the SVD solver (default 500)
     tol_user           -- convergence tolerance (default 1e-6)
     alpha_level_user   -- significance level for CIs (default 0.05)
     ddof_user          -- bootstrap-variance denominator selector:
@@ -85,10 +90,12 @@ real scalar trop_main(
     real colvector panel_idx, time_idx
     real scalar max_iter_eff, tol_eff, alpha_eff, ddof_eff
     real scalar have_ddof
+    real scalar has_survey, do_nest
+    string scalar strata_var, psu_var, fpc_var
     
     // Resolve optional parameters to effective values
     if (args() >= 14 & max_iter_user < . & max_iter_user > 0) max_iter_eff = max_iter_user
-    else max_iter_eff = 100
+    else max_iter_eff = 500
     if (args() >= 15 & tol_user < . & tol_user > 0) tol_eff = tol_user
     else tol_eff = 1e-6
     if (args() >= 16 & alpha_level_user < . & alpha_level_user > 0 & alpha_level_user < 1) alpha_eff = alpha_level_user
@@ -143,6 +150,42 @@ real scalar trop_main(
         if (rc != 0) return(rc)
         if (verbose) {
             printf("{txt}Survey weights: enabled (pweight = %s)\n", weight_var_user)
+        }
+    }
+
+    // Survey design preparation (Rao-Wu bootstrap).
+    // Read survey variables from globals set by the ADO layer.
+    has_survey = st_numscalar("__trop_has_survey_design")
+    if (has_survey >= .) has_survey = 0
+    if (has_survey == 1) {
+        strata_var = st_global("__trop_strata_var")
+        psu_var    = st_global("__trop_psu_var")
+        fpc_var    = st_global("__trop_fpc_var")
+        do_nest    = st_numscalar("__trop_survey_nest")
+        if (do_nest >= .) do_nest = 0
+
+        rc = trop_prepare_survey_design(strata_var, psu_var, fpc_var,
+                                        panel_idx_var, touse_var,
+                                        n_units, do_nest)
+        if (rc != 0) return(rc)
+
+        // Rao-Wu bootstrap requires unit_weights.  When no explicit pweight
+        // was supplied by the user, create uniform weights (all 1.0) so the
+        // C bridge always finds a valid __trop_unit_weights matrix.
+        // This matches the Python reference: unit_weights = np.ones(n_units).
+        if (st_numscalar("__trop_use_weights") == 0) {
+            st_matrix("__trop_unit_weights", J(n_units, 1, 1))
+            st_numscalar("__trop_use_weights", 1)
+            if (verbose) {
+                printf("{txt}Survey design: no pweight specified; using uniform weights\n")
+            }
+        }
+
+        if (verbose) {
+            printf("{txt}Survey design: Rao-Wu bootstrap active\n")
+            printf("{txt}  strata=%s, psu=%s", strata_var, psu_var)
+            if (fpc_var != "") printf(", fpc=%s", fpc_var)
+            printf("\n")
         }
     }
     

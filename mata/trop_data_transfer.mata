@@ -197,6 +197,18 @@ void trop_prepare_output_matrices(
     st_matrix("__trop_omega", J(n_units, 1, 0))
     st_matrix("__trop_delta_time", J(n_periods, 1, 0))
     st_matrix("__trop_delta_unit", J(n_units, 1, 0))
+
+    /* Pre-allocate gamma output (covariates) as 1 x p row vector.
+       trop_prepare_covariates() has already set __trop_n_covariates when
+       covariates are present; honour that value.  Fall back to 1 x 1 when
+       no covariates so that the matrix always exists for the ADO-side
+       `capture confirm matrix __trop_gamma` check. */
+    {
+        real scalar _p_gamma
+        _p_gamma = st_numscalar("__trop_n_covariates")
+        if (_p_gamma >= . | _p_gamma < 1) _p_gamma = 1
+        st_matrix("__trop_gamma", J(1, _p_gamma, 0))
+    }
 }
 
 /*──────────────────────────────────────────────────────────────────────────────
@@ -295,6 +307,85 @@ void trop_prepare_bootstrap(
 }
 
 /*──────────────────────────────────────────────────────────────────────────────
+  trop_prepare_covariates()
+
+  Reads covariate variables from the Stata dataset, pivots each into a
+  (T x N) matrix (same layout as Y), then stacks them column-wise into
+  a (T*N) x p matrix stored as __trop_covariates.  The row ordering is
+  time-major: row k = t * n_units + i, matching the Rust internal layout.
+
+  Arguments
+    cov_varnames    row vector of covariate variable names
+    panel_idx_var   panel index variable (1..N from egen group)
+    time_idx_var    time index variable (1..T from egen group)
+    touse_var       estimation-sample marker
+    n_units         number of cross-sectional units (N)
+    n_periods       number of time periods (T)
+
+  Stored matrices
+    __trop_covariates   (T*N) x p covariate matrix
+  
+  Stored scalars
+    __trop_n_covariates   number of covariates (p)
+
+  Returns
+    0 on success; nonzero on failure
+──────────────────────────────────────────────────────────────────────────────*/
+
+real scalar trop_prepare_covariates(
+    string rowvector cov_varnames,
+    string scalar panel_idx_var,
+    string scalar time_idx_var,
+    string scalar touse_var,
+    real scalar n_units,
+    real scalar n_periods
+)
+{
+    real scalar p, n_obs, i, obs, t_val, u_val, row_idx
+    real colvector panel_idx, time_idx, cov_data
+    real matrix X
+    string scalar varname
+
+    p = cols(cov_varnames)
+    n_obs = n_periods * n_units
+
+    /* Read panel and time indices */
+    panel_idx = st_data(., panel_idx_var, touse_var)
+    time_idx  = st_data(., time_idx_var,  touse_var)
+
+    /* Allocate output matrix */
+    X = J(n_obs, p, 0)
+
+    /* Fill each covariate column */
+    for (i = 1; i <= p; i++) {
+        varname = cov_varnames[i]
+        cov_data = st_data(., varname, touse_var)
+
+        /* Map observation-level data to (t-1)*n_units + (u-1) + 1 row */
+        for (obs = 1; obs <= rows(cov_data); obs++) {
+            t_val = time_idx[obs]    /* 1-based time index */
+            u_val = panel_idx[obs]   /* 1-based unit index */
+            /* Row index: time-major, 1-based for Mata */
+            row_idx = (t_val - 1) * n_units + u_val
+            if (row_idx >= 1 & row_idx <= n_obs) {
+                X[row_idx, i] = cov_data[obs]
+            }
+        }
+    }
+
+    /* Store to Stata */
+    st_matrix("__trop_covariates", X)
+    st_numscalar("__trop_n_covariates", p)
+
+    /* Pre-allocate gamma output as 1 x p row vector (Stata convention).
+       The plugin writes SF_mat_store("__trop_gamma", 1, j+1, val) so this
+       must exist with the correct dimensions before the plugin call. */
+    st_matrix("__trop_gamma", J(1, p, 0))
+
+    return(0)
+}
+
+/*──────────────────────────────────────────────────────────────────────────────
   trop_prepare_pweights()
 
   Extracts a strictly positive, constant-within-unit pweight vector from a
@@ -377,6 +468,174 @@ real scalar trop_prepare_pweights(
     st_matrix("__trop_unit_weights", w_unit)
     st_numscalar("__trop_use_weights", 1)
     st_global("__trop_weight_var", weight_var)
+
+    return(0)
+}
+
+/*──────────────────────────────────────────────────────────────────────────────
+  trop_prepare_survey_design()
+
+  Reads survey design variables (strata, PSU, FPC) from the Stata dataset,
+  collapses observation-level values to unit-level (verifying within-unit
+  constancy), encodes them as 0-based integer indices, and stores the
+  results as Stata matrices for the Rao-Wu bootstrap plugin.
+
+  Arguments
+    strata_var      name of the stratification variable
+    psu_var         name of the primary sampling unit variable
+    fpc_var         name of the FPC variable ("" if not specified)
+    panel_idx_var   panel index variable (1..N, from egen group)
+    touse_var       estimation-sample marker
+    n_units         number of cross-sectional units (N)
+    do_nest         1 = nest PSU within strata (combine strata*PSU labels)
+
+  Stored matrices
+    __trop_strata   N x 1  integer-encoded strata (0-based)
+    __trop_psu      N x 1  integer-encoded PSU    (0-based)
+    __trop_fpc      N x 1  FPC values (or empty if fpc_var=="")
+
+  Stored scalars
+    __trop_has_survey_design = 1
+    __trop_n_strata          number of distinct strata
+    __trop_n_psu             number of distinct PSU
+
+  Returns
+    0 on success; nonzero Stata return code on validation failure.
+──────────────────────────────────────────────────────────────────────────────*/
+
+real scalar trop_prepare_survey_design(
+    string scalar strata_var,
+    string scalar psu_var,
+    string scalar fpc_var,
+    string scalar panel_idx_var,
+    string scalar touse_var,
+    real scalar n_units,
+    real scalar do_nest
+)
+{
+    real colvector panel_idx, strata_obs, psu_obs, fpc_obs
+    real colvector strata_unit, psu_unit, fpc_unit, seen
+    real colvector strata_encoded, psu_encoded
+    real scalar i, idx, n_obs
+    real scalar n_strata, n_psu
+    real colvector strata_labels, psu_labels
+    real scalar found
+
+    /* 1. Read observation-level data */
+    panel_idx  = st_data(., panel_idx_var, touse_var)
+    strata_obs = st_data(., strata_var,    touse_var)
+    psu_obs    = st_data(., psu_var,       touse_var)
+    n_obs = rows(panel_idx)
+
+    if (fpc_var != "") {
+        fpc_obs = st_data(., fpc_var, touse_var)
+    }
+
+    /* 2. Collapse to unit-level and verify within-unit constancy */
+    strata_unit = J(n_units, 1, .)
+    psu_unit    = J(n_units, 1, .)
+    fpc_unit    = J(n_units, 1, .)
+    seen        = J(n_units, 1, 0)
+
+    for (i = 1; i <= n_obs; i++) {
+        idx = panel_idx[i]
+        if (idx < 1 | idx > n_units) {
+            errprintf("panel index %g out of range [1, %g]\n", idx, n_units)
+            return(459)
+        }
+        if (!seen[idx]) {
+            strata_unit[idx] = strata_obs[i]
+            psu_unit[idx]    = psu_obs[i]
+            if (fpc_var != "") fpc_unit[idx] = fpc_obs[i]
+            seen[idx] = 1
+        }
+        else {
+            /* Verify within-unit constancy */
+            if (strata_unit[idx] != strata_obs[i]) {
+                errprintf("strata variable '%s' is not constant within unit %g "
+                    + "(found %g and %g)\n",
+                    strata_var, idx, strata_unit[idx], strata_obs[i])
+                return(459)
+            }
+            if (psu_unit[idx] != psu_obs[i]) {
+                errprintf("psu variable '%s' is not constant within unit %g "
+                    + "(found %g and %g)\n",
+                    psu_var, idx, psu_unit[idx], psu_obs[i])
+                return(459)
+            }
+            if (fpc_var != "") {
+                if (reldif(fpc_unit[idx], fpc_obs[i]) > 1e-12) {
+                    errprintf("fpc variable '%s' is not constant within unit %g "
+                        + "(found %g and %g)\n",
+                        fpc_var, idx, fpc_unit[idx], fpc_obs[i])
+                    return(459)
+                }
+            }
+        }
+    }
+
+    /* 3. Integer encoding (0-based) */
+    /* If nest=1, combine strata+PSU into a single label before encoding PSU */
+    if (do_nest) {
+        /* Create composite label: strata * 1e9 + psu */
+        for (i = 1; i <= n_units; i++) {
+            psu_unit[i] = strata_unit[i] * 1e9 + psu_unit[i]
+        }
+    }
+
+    /* Encode strata: map unique values to 0, 1, 2, ... */
+    strata_labels = J(0, 1, .)
+    strata_encoded = J(n_units, 1, 0)
+    for (i = 1; i <= n_units; i++) {
+        found = 0
+        for (idx = 1; idx <= rows(strata_labels); idx++) {
+            if (strata_labels[idx] == strata_unit[i]) {
+                strata_encoded[i] = idx - 1
+                found = 1
+                break
+            }
+        }
+        if (!found) {
+            strata_labels = strata_labels \ strata_unit[i]
+            strata_encoded[i] = rows(strata_labels) - 1
+        }
+    }
+    n_strata = rows(strata_labels)
+
+    /* Encode PSU: map unique values to 0, 1, 2, ... */
+    psu_labels = J(0, 1, .)
+    psu_encoded = J(n_units, 1, 0)
+    for (i = 1; i <= n_units; i++) {
+        found = 0
+        for (idx = 1; idx <= rows(psu_labels); idx++) {
+            if (psu_labels[idx] == psu_unit[i]) {
+                psu_encoded[i] = idx - 1
+                found = 1
+                break
+            }
+        }
+        if (!found) {
+            psu_labels = psu_labels \ psu_unit[i]
+            psu_encoded[i] = rows(psu_labels) - 1
+        }
+    }
+    n_psu = rows(psu_labels)
+
+    /* 4. Store to Stata matrices */
+    st_matrix("__trop_strata", strata_encoded)
+    st_matrix("__trop_psu", psu_encoded)
+    if (fpc_var != "") {
+        st_matrix("__trop_fpc", fpc_unit)
+    }
+    else {
+        /* Empty 0x1 sentinel: plugin checks rows==0 to skip FPC */
+        st_matrix("__trop_fpc", J(0, 1, .))
+    }
+
+    /* 5. Store metadata scalars */
+    st_numscalar("__trop_has_survey_design", 1)
+    st_numscalar("__trop_n_strata", n_strata)
+    st_numscalar("__trop_n_psu", n_psu)
 
     return(0)
 }

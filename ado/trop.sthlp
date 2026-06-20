@@ -399,6 +399,14 @@ This assumes homogeneous treatment effects, is computationally more
 efficient, and is intended for panels where the treated units share the
 same adoption window.
 
+{pmore}
+{bf:Note.} Paper Remark 6.1 defines the homogeneous-tau aggregation but
+does not prescribe a specific time/unit kernel under the shared-weight
+setting; the post-block midpoint and the pre-period trajectory RMSE used
+above are {it:engineering choices} adopted by {cmd:trop}, not formulas
+restated from the paper.  See "Methods and formulas" for the explicit
+delta_time / delta_unit definitions.
+
 {pstd}
 {bf:When to use each method:}
 
@@ -791,6 +799,34 @@ treated unit-time pairs (paper Eq. 1 / Algorithm 2 step 6):
 tau_hat = (1 / sum_{i,t} W_{it}) * sum_{i,t} W_{it} * tau_hat_{it}
 
 {pstd}
+{bf:Joint method specifics (Remark 6.1).}  Under the homogeneous-treatment
+restriction of paper Remark 6.1, {opt joint} replaces the cell-specific
+fits with a single weighted least-squares problem over a shared weight
+matrix delta = delta_time * delta_unit'.  Paper Remark 6.1 sketches the
+aggregation but does {it:not} prescribe concrete time / unit kernels, so
+{cmd:trop} adopts the following engineering choice (pinned by the released
+numerical baseline):
+
+{p 8 8 2}
+delta_time[s] = exp(-lambda_time * |s - center|),
+center = T - T_post / 2
+
+{p 8 8 2}
+delta_unit[j] = exp(-lambda_unit * RMSE_pre(j, avg_treated))
+
+{pstd}
+where {it:center} is the midpoint of the treated block, {it:T_post} is the
+shared post-period count, and {it:RMSE_pre(j, avg_treated)} is the RMSE
+of unit j's pre-treatment outcomes against the period-wise average treated
+trajectory.  These distance definitions are a reasonable adaptation of
+Eq. (3) to the shared-weight setting; the post-block midpoint and the
+pre-period trajectory RMSE are specific engineering choices, not formulas
+prescribed by the paper.  After fitting (mu, alpha, beta, L) by
+weighted nuclear-norm regression with weight matrix delta * (1 - W), the
+scalar tau_hat is recovered post-hoc as the weighted mean residual on
+treated cells (paper Eq. 10 identity for the homogeneous-tau case).
+
+{pstd}
 The triple robustness property (Theorem 5.1) states that the bias satisfies:
 
 {p 8 8 2}
@@ -869,13 +905,13 @@ might want to inspect are listed below; each one is pinned by a regression
 test so future refactors cannot silently regress.
 
 {phang}
-1. {bf:Adaptive FISTA restart} ({cmd:rust/src/estimation.rs}).  The
-nuclear-norm proximal solver uses the monotone gradient-restart scheme
-of O'Donoghue &amp; Candes (2015).  Plain FISTA can oscillate when
-lambda_nn sits near the soft-threshold boundary (e.g. lambda_nn in
-{c -(}0.006, 0.011{c )-}); the restart scheme keeps the iterate sequence
-monotone without changing the fixed point.  Locked in by
-{cmd:tests/test_fista_restart_stability.do}.
+1. {bf:FISTA adaptive restart disabled} ({cmd:rust/src/estimation.rs}).  The
+nuclear-norm proximal solver does {bf:not} use the monotone gradient-restart
+scheme of O'Donoghue & Candes (2015).  Although the restart criterion can
+eliminate momentum oscillations in theory, it fires too aggressively on
+small panels and prevents convergence.  The reference Python implementation
+does not use restart either, so it is disabled to maintain numerical
+consistency.  Locked in by {cmd:tests/test_fista_restart_stability.do}.
 
 {phang}
 2. {bf:LAPACK dgelsd for the weighted least-squares step}

@@ -672,7 +672,7 @@ void _trop_display_unconverged_obs(real scalar n_iterations)
         }
     }
     printf("{res}         See e(converged_by_obs) and e(n_iters_by_obs) for the full pattern.{txt}\n")
-    printf("{res}         Consider increasing maxiter() (default 100) or adjusting lambda_nn.{txt}\n")
+    printf("{res}         Consider increasing maxiter() (default 500) or adjusting lambda_nn.{txt}\n")
 }
 
 /*──────────────────────────────────────────────────────────────────────────────

@@ -76,6 +76,7 @@ fn main() {
         &ln_grid,
         100,
         1e-6,
+        None,
     );
     let dt = t0.elapsed();
     println!(
@@ -95,6 +96,7 @@ fn main() {
         &[0.01],
         100,
         1e-6,
+        None,
     );
     println!("  elapsed       : {:.2?}  λ=({},{},{})  score={}", t0.elapsed(), r.0, r.1, r.2, r.3);
 }

@@ -104,18 +104,19 @@ pub(crate) fn debug_assert_delta_is_1minus_d_masked(
 
 /// Result type for twostep per-observation estimation.
 ///
-/// Fields: `(alpha, beta, L, n_iterations, converged)`.
+/// Fields: `(alpha, beta, L, n_iterations, converged, gamma)`.
 /// - `alpha`: unit fixed effects (length N).
 /// - `beta`: time fixed effects (length T).
 /// - `L`: low-rank matrix (T × N).
 /// - `n_iterations`: number of alternating minimization iterations performed.
 /// - `converged`: whether the algorithm met the convergence tolerance.
+/// - `gamma`: covariate coefficients (length p), or None when no covariates.
 #[allow(clippy::type_complexity)]
-pub type TwostepModelResult = Option<(Array1<f64>, Array1<f64>, Array2<f64>, usize, bool)>;
+pub type TwostepModelResult = Option<(Array1<f64>, Array1<f64>, Array2<f64>, usize, bool, Option<Array1<f64>>)>;
 
 /// Result type for joint estimation with low-rank component.
 ///
-/// Fields: `(mu, alpha, beta, L, tau, n_iterations, converged)`.
+/// Fields: `(mu, alpha, beta, L, tau, n_iterations, converged, gamma)`.
 /// - `mu`: global intercept.
 /// - `alpha`: unit fixed effects (length N).
 /// - `beta`: time fixed effects (length T).
@@ -123,8 +124,9 @@ pub type TwostepModelResult = Option<(Array1<f64>, Array1<f64>, Array2<f64>, usi
 /// - `tau`: homogeneous treatment effect.
 /// - `n_iterations`: number of alternating minimization iterations performed.
 /// - `converged`: whether the algorithm met the convergence tolerance.
+/// - `gamma`: covariate coefficients (length p), or None when no covariates.
 #[allow(clippy::type_complexity)]
-pub type JointLowRankResult = Option<(f64, Array1<f64>, Array1<f64>, Array2<f64>, f64, usize, bool)>;
+pub type JointLowRankResult = Option<(f64, Array1<f64>, Array1<f64>, Array2<f64>, f64, usize, bool, Option<Array1<f64>>)>;
 
 /// Maximum absolute difference between two 1D arrays.
 #[inline]
@@ -226,6 +228,105 @@ pub fn soft_threshold_svd(m: &Array2<f64>, threshold: f64) -> Option<Array2<f64>
     Some(result)
 }
 
+/// Solve a symmetric positive definite system Ax = b via Cholesky decomposition.
+///
+/// For small p×p systems arising from X'WX in the covariate WLS step.
+/// Returns `None` if the matrix is not positive definite (e.g., rank-deficient).
+fn solve_symmetric_positive(a: &Array2<f64>, b: &Array1<f64>) -> Option<Array1<f64>> {
+    let n = a.nrows();
+    if n == 0 || a.ncols() != n || b.len() != n {
+        return None;
+    }
+
+    // Cholesky decomposition: A = L L^T
+    let mut l_mat = Array2::<f64>::zeros((n, n));
+    for i in 0..n {
+        for j in 0..=i {
+            let mut sum = a[[i, j]];
+            for k in 0..j {
+                sum -= l_mat[[i, k]] * l_mat[[j, k]];
+            }
+            if i == j {
+                if sum <= 0.0 {
+                    return None; // Not positive definite
+                }
+                l_mat[[i, j]] = sum.sqrt();
+            } else {
+                l_mat[[i, j]] = sum / l_mat[[j, j]];
+            }
+        }
+    }
+
+    // Forward substitution: L y = b
+    let mut y_vec = Array1::<f64>::zeros(n);
+    for i in 0..n {
+        let mut sum = b[i];
+        for j in 0..i {
+            sum -= l_mat[[i, j]] * y_vec[j];
+        }
+        y_vec[i] = sum / l_mat[[i, i]];
+    }
+
+    // Back substitution: L^T x = y
+    let mut x_vec = Array1::<f64>::zeros(n);
+    for i in (0..n).rev() {
+        let mut sum = y_vec[i];
+        for j in (i + 1)..n {
+            sum -= l_mat[[j, i]] * x_vec[j];
+        }
+        x_vec[i] = sum / l_mat[[i, i]];
+    }
+
+    Some(x_vec)
+}
+
+/// Least squares solve for potentially rank-deficient system Ax = b.
+///
+/// Uses SVD via faer for numerical stability. For the small p×p systems
+/// arising from X'WX when Cholesky fails.
+fn solve_lstsq_small(a: &Array2<f64>, b: &Array1<f64>) -> Option<Array1<f64>> {
+    let n = a.nrows();
+    if n == 0 || a.ncols() != n || b.len() != n {
+        return None;
+    }
+
+    // Convert to faer Mat
+    let faer_a = Mat::from_fn(n, n, |i, j| a[[i, j]]);
+    let faer_b = Mat::from_fn(n, 1, |i, _| b[i]);
+
+    // Compute SVD of A
+    let svd = match Svd::new(faer_a.as_ref()) {
+        Ok(s) => s,
+        Err(_) => return None,
+    };
+
+    let u = svd.U();
+    let s = svd.S().column_vector();
+    let v = svd.V();
+
+    // Pseudoinverse solve: x = V * S^{-1} * U^T * b
+    // with singular value truncation for stability
+    let tol = 1e-12 * s[0].abs(); // relative tolerance
+    let mut x_vec = Array1::<f64>::zeros(n);
+
+    for k in 0..n {
+        if s[k].abs() > tol {
+            // Compute U[:,k]^T * b
+            let mut utb = 0.0;
+            for i in 0..n {
+                utb += u[(i, k)] * faer_b[(i, 0)];
+            }
+            // Accumulate V[:,k] * (1/s_k) * (U[:,k]^T * b)
+            let coeff = utb / s[k];
+            for i in 0..n {
+                x_vec[i] += v[(i, k)] * coeff;
+            }
+        }
+    }
+
+    Some(x_vec)
+}
+
 /// Estimate the TROP model via alternating minimization (twostep method).
 ///
 /// For each treated observation (i, t), solves the weighted nuclear-norm-penalized
@@ -257,7 +358,7 @@ pub fn soft_threshold_svd(m: &Array2<f64>, threshold: f64) -> Option<Array2<f64>
 /// * `exclude_obs` - Optional (t, i) index to exclude (for leave-one-out CV).
 ///
 /// # Returns
-/// `Some((alpha, beta, L, n_iterations, converged))` on success, `None` on failure.
+/// `Some((alpha, beta, L, n_iterations, converged, gamma))` on success, `None` on failure.
 #[allow(clippy::too_many_arguments)]
 pub fn estimate_model(
     y: &ArrayView2<f64>,
@@ -270,6 +371,8 @@ pub fn estimate_model(
     tol: f64,
     exclude_obs: Option<(usize, usize)>,
     warm_start: Option<(&Array1<f64>, &Array1<f64>, &Array2<f64>)>,
+    x: Option<&ArrayView2<f64>>,
+    gamma_init: Option<&Array1<f64>>,
 ) -> TwostepModelResult {
     // Create estimation mask
     let mut est_mask =
@@ -343,6 +446,15 @@ pub fn estimate_model(
         )
     };
 
+    // Initialize gamma for covariate coefficients
+    let mut gamma = if let Some(g_init) = gamma_init {
+        g_init.clone()
+    } else if let Some(x_mat) = x {
+        Array1::<f64>::zeros(x_mat.ncols())
+    } else {
+        Array1::<f64>::zeros(0) // empty vector, never used
+    };
+
     // Track actual iteration count and convergence status
     let mut actual_iters: usize = 0;
     let mut converged = false;
@@ -353,10 +465,19 @@ pub fn estimate_model(
         let alpha_old = alpha.clone();
         let beta_old = beta.clone();
         let l_old = l.clone();
+        let gamma_old = gamma.clone();
 
         // Step 1: Update α and β (weighted least squares).
-        // R = Y - L
-        let r = &y_safe - &l;
+        // R = Y - L - X'γ (when covariates present)
+        let r = if let Some(x_mat) = x {
+            Array2::from_shape_fn((n_periods, n_units), |(t, i)| {
+                let idx = t * n_units + i;
+                let x_gamma = x_mat.row(idx).dot(&gamma);
+                y_safe[[t, i]] - l[[t, i]] - x_gamma
+            })
+        } else {
+            &y_safe - &l
+        };
 
         // Gauss–Seidel update order: α first, then β using the new α.
         // Converges faster than Jacobi; the fixed point is identical.
@@ -385,6 +506,55 @@ pub fn estimate_model(
             }
         }
 
+        // Step 1b: Update γ via WLS (Equation 14, only when covariates present)
+        // γ = (X'WX)^{-1} X'W(Y - α - β - L)
+        if let Some(x_mat) = x {
+            let n_obs = n_periods * n_units;
+            let n_cov = x_mat.ncols();
+
+            // Compute residual: Y - α - β - L (flattened, row-major t*n_units+i)
+            let mut resid = Array1::<f64>::zeros(n_obs);
+            let mut w_flat = Array1::<f64>::zeros(n_obs);
+            for t in 0..n_periods {
+                for i in 0..n_units {
+                    let idx = t * n_units + i;
+                    resid[idx] = y_safe[[t, i]] - alpha[i] - beta[t] - l[[t, i]];
+                    w_flat[idx] = w_masked[[t, i]];
+                }
+            }
+
+            // Build X'WX and X'Wy
+            let mut xtwx = Array2::<f64>::zeros((n_cov, n_cov));
+            let mut xtwy = Array1::<f64>::zeros(n_cov);
+
+            for k in 0..n_obs {
+                let wk = w_flat[k];
+                if wk <= 0.0 {
+                    continue;
+                }
+                let x_row = x_mat.row(k);
+                let rk = resid[k];
+                for j in 0..n_cov {
+                    xtwy[j] += wk * x_row[j] * rk;
+                    for m in j..n_cov {
+                        let val = wk * x_row[j] * x_row[m];
+                        xtwx[[j, m]] += val;
+                        if m != j {
+                            xtwx[[m, j]] += val; // symmetric
+                        }
+                    }
+                }
+            }
+
+            // Solve XtWX * gamma = XtWy using Cholesky or fallback to lstsq
+            if let Some(gamma_new) = solve_symmetric_positive(&xtwx, &xtwy) {
+                gamma = gamma_new;
+            } else if let Some(gamma_new) = solve_lstsq_small(&xtwx, &xtwy) {
+                gamma = gamma_new;
+            }
+            // else: keep previous gamma (graceful degradation)
+        }
+
         // Step 2: Update L via proximal gradient for the nuclear norm penalty.
         //
         // Subproblem: min_L (1/2) Σ w_{ti} (R_{ti} − L_{ti})² + λ ‖L‖_*
@@ -396,11 +566,17 @@ pub fn estimate_model(
         //
         // Threshold = η λ = λ/w_max.
 
-        // Compute target residual R = Y - α - β
+        // Compute target residual R = Y - α - β - X'γ
         let mut r_target = Array2::<f64>::zeros((n_periods, n_units));
         for t in 0..n_periods {
             for i in 0..n_units {
-                r_target[[t, i]] = y_safe[[t, i]] - alpha[i] - beta[t];
+                let x_contrib = if let Some(x_mat) = x {
+                    let idx = t * n_units + i;
+                    x_mat.row(idx).dot(&gamma)
+                } else {
+                    0.0
+                };
+                r_target[[t, i]] = y_safe[[t, i]] - alpha[i] - beta[t] - x_contrib;
             }
         }
 
@@ -532,23 +708,29 @@ pub fn estimate_model(
             }
         }
 
-        // Outer convergence: simultaneous stability of all three blocks.
-        // Eq. 2 is `argmin` over (α, β, L); monitoring only ‖ΔL‖ can declare
+        // Outer convergence: simultaneous stability of all blocks.
+        // Eq. 2 is `argmin` over (α, β, L, γ); monitoring only ‖ΔL‖ can declare
         // convergence while (α, β) are still drifting inside the null space
         // of the row/column centering identification.  See the matching note
         // in `solve_joint_with_lowrank`.
         let alpha_diff = max_abs_diff(&alpha, &alpha_old);
         let beta_diff = max_abs_diff(&beta, &beta_old);
         let l_diff = max_abs_diff_2d(&l, &l_old);
+        let gamma_diff = if x.is_some() {
+            max_abs_diff(&gamma, &gamma_old)
+        } else {
+            0.0
+        };
 
-        if alpha_diff.max(beta_diff).max(l_diff) < tol {
+        if alpha_diff.max(beta_diff).max(l_diff).max(gamma_diff) < tol {
             converged = true;
             break;
         }
     }
 
     // Return actual iteration count and convergence status
-    Some((alpha, beta, l, actual_iters, converged))
+    let gamma_out = if x.is_some() { Some(gamma) } else { None };
+    Some((alpha, beta, l, actual_iters, converged, gamma_out))
 }
 
 /// Solve the weighted two-way fixed effects regression over control observations.
@@ -575,18 +757,22 @@ pub fn estimate_model(
 /// * `delta` - Global weight matrix δ (T × N), already (1 − D)-masked.
 ///
 /// # Returns
-/// `Some((mu, alpha, beta))` on success, `None` if the system is degenerate.
+/// `Some((mu, alpha, beta, gamma))` on success, `None` if the system is degenerate.
 pub fn solve_joint_no_lowrank(
     y: &ArrayView2<f64>,
     delta: &ArrayView2<f64>,
-) -> Option<(f64, Array1<f64>, Array1<f64>)> {
+    x: Option<&ArrayView2<f64>>,
+) -> Option<(f64, Array1<f64>, Array1<f64>, Option<Array1<f64>>)> {
     let n_periods = y.nrows();
     let n_units = y.ncols();
     let n_obs = n_periods * n_units;
 
-    // Parameter count: 1 (intercept) + (N−1) unit dummies + (T−1) time dummies.
+    // Number of covariate columns
+    let n_cov = x.map_or(0, |xm| xm.ncols());
+
+    // Parameter count: 1 (intercept) + (N−1) unit dummies + (T−1) time dummies + p covariates.
     // There is NO treatment column — τ is computed post-hoc as ATT on residuals.
-    let n_params = 1 + (n_units - 1) + (n_periods - 1);
+    let n_params = 1 + (n_units - 1) + (n_periods - 1) + n_cov;
 
     // Vectorize the panel and compute observation weights.
     let mut y_vec = Vec::with_capacity(n_obs);
@@ -643,6 +829,14 @@ pub fn solve_joint_no_lowrank(
             // Columns N..(N+T−2): time dummies (time 0 dropped for identification)
             if t > 0 {
                 a_mat[((n_units - 1) + t) * n_obs + obs_idx] = sw;
+            }
+
+            // Columns (1+N-1+T-1)..(1+N-1+T-1+p): covariate columns
+            if let Some(x_mat) = x {
+                let base_col = 1 + (n_units - 1) + (n_periods - 1);
+                for p_idx in 0..n_cov {
+                    a_mat[(base_col + p_idx) * n_obs + obs_idx] = sw * x_mat[[obs_idx, p_idx]];
+                }
             }
         }
     }
@@ -762,6 +956,13 @@ pub fn solve_joint_no_lowrank(
             if t > 0 {
                 a_mat[((n_units - 1) + t) * n_obs + obs_idx] = sw;
             }
+            // Covariate columns
+            if let Some(x_mat) = x {
+                let base_col = 1 + (n_units - 1) + (n_periods - 1);
+                for p_idx in 0..n_cov {
+                    a_mat[(base_col + p_idx) * n_obs + obs_idx] = sw * x_mat[[obs_idx, p_idx]];
+                }
+            }
         }
     }
 
@@ -804,7 +1005,19 @@ pub fn solve_joint_no_lowrank(
         beta[t] = b_vec[(n_units - 1) + t];
     }
 
-    Some((mu, alpha, beta))
+    // Extract gamma (covariate coefficients) if covariates present
+    let gamma_out = if n_cov > 0 {
+        let base_idx = 1 + (n_units - 1) + (n_periods - 1);
+        let mut gamma_vec = Array1::<f64>::zeros(n_cov);
+        for p_idx in 0..n_cov {
+            gamma_vec[p_idx] = b_vec[base_idx + p_idx];
+        }
+        Some(gamma_vec)
+    } else {
+        None
+    };
+
+    Some((mu, alpha, beta, gamma_out))
 }
 
 /// Solve the joint TWFE + low-rank model via alternating minimization, with
@@ -873,6 +1086,7 @@ pub fn solve_joint_with_lowrank(
     lambda_nn: f64,
     max_iter: usize,
     tol: f64,
+    x: Option<&ArrayView2<f64>>,
 ) -> JointLowRankResult {
     let n_periods = y.nrows();
     let n_units = y.ncols();
@@ -943,19 +1157,30 @@ pub fn solve_joint_with_lowrank(
         let y_adj = Array2::from_shape_fn((n_periods, n_units), |(t, i)| {
             y_safe[[t, i]] - l[[t, i]]
         });
-        let (mu_new, alpha_new, beta_new) =
-            solve_joint_no_lowrank(&y_adj.view(), &delta_masked.view())?;
+        let (mu_new, alpha_new, beta_new, gamma_new) =
+            solve_joint_no_lowrank(&y_adj.view(), &delta_masked.view(), x)?;
         mu = mu_new;
         alpha = alpha_new;
         beta = beta_new;
+        let gamma_joint = gamma_new;
 
-        // Step 2: Fix (μ, α, β), update L via FISTA proximal gradient.
-        // Target residual R = Y − μ − α − β; at zero-weight cells (treated /
+        // Step 2: Fix (μ, α, β, γ), update L via FISTA proximal gradient.
+        // Target residual R = Y − μ − α − β − X'γ; at zero-weight cells (treated /
         // non-finite) we substitute the current L so the gradient step leaves
         // L unchanged in those positions.
         let r_masked = Array2::from_shape_fn((n_periods, n_units), |(t, i)| {
             if delta_norm[[t, i]] > 0.0 {
-                y_safe[[t, i]] - mu - alpha[i] - beta[t]
+                let x_contrib = if let Some(x_mat) = x {
+                    let idx = t * n_units + i;
+                    if let Some(ref gv) = gamma_joint {
+                        x_mat.row(idx).dot(gv)
+                    } else {
+                        0.0
+                    }
+                } else {
+                    0.0
+                };
+                y_safe[[t, i]] - mu - alpha[i] - beta[t] - x_contrib
             } else {
                 l[[t, i]]
             }
@@ -1039,7 +1264,7 @@ pub fn solve_joint_with_lowrank(
         }
     }
 
-    // Final re-solve of (μ, α, β) using the converged L so the returned
+    // Final re-solve of (μ, α, β, γ) using the converged L so the returned
     // parameters are mutually consistent: the penultimate WLS step fitted
     // (μ, α, β) against a stale L, so without this re-solve the returned
     // triple would correspond to a (L_old, μ, α, β) pair rather than the
@@ -1047,20 +1272,30 @@ pub fn solve_joint_with_lowrank(
     let y_adj_final = Array2::from_shape_fn((n_periods, n_units), |(t, i)| {
         y_safe[[t, i]] - l[[t, i]]
     });
-    let (mu_final, alpha_final, beta_final) =
-        solve_joint_no_lowrank(&y_adj_final.view(), &delta_masked.view())?;
+    let (mu_final, alpha_final, beta_final, gamma_final) =
+        solve_joint_no_lowrank(&y_adj_final.view(), &delta_masked.view(), x)?;
     mu = mu_final;
     alpha = alpha_final;
     beta = beta_final;
 
     // Post-hoc τ: mean residual over observed treated cells.
-    //   τ̂ = (1 / |T_1|) Σ_{D=1} (Y − μ − α_i − β_t − L_{t, i})
+    //   τ̂ = (1 / |T_1|) Σ_{D=1} (Y − μ − α_i − β_t − L_{t, i} − X'γ)
     let mut tau_sum = 0.0_f64;
     let mut tau_count: usize = 0;
     for t in 0..n_periods {
         for i in 0..n_units {
             if d[[t, i]] == 1.0 && y[[t, i]].is_finite() {
-                tau_sum += y[[t, i]] - mu - alpha[i] - beta[t] - l[[t, i]];
+                let x_contrib = if let Some(x_mat) = x {
+                    let idx = t * n_units + i;
+                    if let Some(ref gv) = gamma_final {
+                        x_mat.row(idx).dot(gv)
+                    } else {
+                        0.0
+                    }
+                } else {
+                    0.0
+                };
+                tau_sum += y[[t, i]] - mu - alpha[i] - beta[t] - l[[t, i]] - x_contrib;
                 tau_count += 1;
             }
         }
@@ -1071,7 +1306,7 @@ pub fn solve_joint_with_lowrank(
         0.0
     };
 
-    Some((mu, alpha, beta, l, tau, actual_iters, converged))
+    Some((mu, alpha, beta, l, tau, actual_iters, converged, gamma_final))
 }
 
 #[cfg(test)]
@@ -1154,9 +1389,11 @@ mod tests {
             1e-10,
             None,
             None,
+            None,
+            None,
         );
 
-        let (alpha, beta, l, _n_iters, converged) = result.expect("λ_nn=0 fit should succeed");
+        let (alpha, beta, l, _n_iters, converged, _gamma) = result.expect("λ_nn=0 fit should succeed");
         assert!(converged, "λ_nn=0 closed form should converge in few iterations");
 
         // On the weighted support: L ≈ Y − α − β.
@@ -1273,10 +1510,10 @@ mod tests {
         let d = array![[0.0, 0.0], [0.0, 0.0], [0.0, 1.0]];
         let delta = array![[1.0, 1.0], [1.0, 1.0], [1.0, 1.0]];
 
-        let result = solve_joint_no_lowrank(&y.view(), &delta.view());
+        let result = solve_joint_no_lowrank(&y.view(), &delta.view(), None);
         assert!(result.is_some());
 
-        let (mu, alpha, beta) = result.unwrap();
+        let (mu, alpha, beta, _gamma) = result.unwrap();
         // Post-hoc τ = mean residual over treated cells.
         let tau = post_hoc_tau(&y.view(), &d.view(), mu, &alpha, &beta, None);
         // tau should capture the treatment effect
@@ -1411,11 +1648,13 @@ mod tests {
             1e-6, // tol
             None,
             None,
+            None,
+            None,
         );
 
         assert!(result.is_some(), "Model estimation should converge");
 
-        let (alpha, beta, l, n_iters, converged) = result.unwrap();
+        let (alpha, beta, l, n_iters, converged, _gamma) = result.unwrap();
 
         // Check dimensions
         assert_eq!(alpha.len(), 3, "Alpha should have n_units elements");
@@ -1455,6 +1694,8 @@ mod tests {
             1e-6,
             Some((1, 0)), // Exclude observation at (1, 0)
             None,
+            None,
+            None,
         );
 
         assert!(
@@ -1462,7 +1703,7 @@ mod tests {
             "Model should converge with excluded observation"
         );
 
-        let (_alpha, _beta, _l, n_iters, _converged) = result.unwrap();
+        let (_alpha, _beta, _l, n_iters, _converged, _gamma) = result.unwrap();
         assert!(n_iters > 0, "Should have at least 1 iteration with exclude_obs");
     }
 
@@ -1499,10 +1740,10 @@ mod tests {
             [1.0, 0.0]
         ];
 
-        let result = solve_joint_no_lowrank(&y.view(), &delta.view());
+        let result = solve_joint_no_lowrank(&y.view(), &delta.view(), None);
         assert!(result.is_some(), "Joint estimation should succeed");
 
-        let (mu, alpha, beta) = result.unwrap();
+        let (mu, alpha, beta, _gamma) = result.unwrap();
         // Post-hoc τ = mean residual (Y − μ − α − β) over treated cells.
         let tau = post_hoc_tau(&y.view(), &d.view(), mu, &alpha, &beta, None);
 
@@ -1536,7 +1777,7 @@ mod tests {
             [1.0, 1.0, 1.0],
             [1.0, 1.0, 1.0],
             [1.0, 1.0, 1.0],
-            [1.0, 1.0, 1.0]
+            [1.0, 1.0, 0.0]  // (1-D) mask: treated cell zeroed
         ];
 
         let result = solve_joint_with_lowrank(
@@ -1546,11 +1787,12 @@ mod tests {
             0.1,  // lambda_nn
             100,  // max_iter
             1e-6, // tol
+            None,
         );
 
         assert!(result.is_some(), "Joint with low-rank should converge");
 
-        let (mu, alpha, beta, l, tau, n_iters, converged) = result.unwrap();
+        let (mu, alpha, beta, l, tau, n_iters, converged, _gamma) = result.unwrap();
 
         // Check all values are finite
         assert!(mu.is_finite(), "mu should be finite");
@@ -1610,9 +1852,10 @@ mod tests {
             0.01,
             200,   // outer max_iter
             1e-8,  // tight tol
+            None,
         );
         assert!(result_small.is_some(), "λ_nn = 0.01 must converge under expanded cap");
-        let (_mu_s, _alpha_s, _beta_s, _l_s, tau_s, _n_iters_s, converged_s) =
+        let (_mu_s, _alpha_s, _beta_s, _l_s, tau_s, _n_iters_s, converged_s, _gamma_s) =
             result_small.unwrap();
         assert!(converged_s, "λ_nn = 0.01 must report converged = true");
         assert!(tau_s.is_finite(), "τ(λ_nn = 0.01) must be finite, got {}", tau_s);
@@ -1625,9 +1868,10 @@ mod tests {
             0.5,
             200,
             1e-8,
+            None,
         );
         assert!(result_big.is_some(), "λ_nn = 0.5 baseline must converge");
-        let (_mu_b, _alpha_b, _beta_b, _l_b, tau_b, _n_iters_b, _conv_b) =
+        let (_mu_b, _alpha_b, _beta_b, _l_b, tau_b, _n_iters_b, _conv_b, _gamma_b) =
             result_big.unwrap();
         assert!(tau_b.is_finite(), "τ(λ_nn = 0.5) baseline must be finite");
 
@@ -1645,10 +1889,10 @@ mod tests {
         let d = array![[0.0, 0.0], [0.0, 0.0], [0.0, 1.0]];
         let delta = array![[1.0, 1.0], [1.0, 1.0], [1.0, 1.0]];
 
-        let result = solve_joint_no_lowrank(&y.view(), &delta.view());
+        let result = solve_joint_no_lowrank(&y.view(), &delta.view(), None);
         assert!(result.is_some(), "Should handle NaN values");
 
-        let (mu, alpha, beta) = result.unwrap();
+        let (mu, alpha, beta, _gamma) = result.unwrap();
         let tau = post_hoc_tau(&y.view(), &d.view(), mu, &alpha, &beta, None);
         assert!(
             tau.is_finite(),
@@ -1665,33 +1909,33 @@ mod tests {
         let d = array![[0.0, 0.0], [0.0, 0.0], [0.0, 1.0]];
         let delta_clean = array![[1.0, 1.0], [1.0, 1.0], [1.0, 1.0]];
 
-        let result_clean = solve_joint_no_lowrank(&y.view(), &delta_clean.view());
+        let result_clean = solve_joint_no_lowrank(&y.view(), &delta_clean.view(), None);
         assert!(result_clean.is_some(), "Clean case should succeed");
-        let (mu_c, alpha_c, beta_c) = result_clean.unwrap();
+        let (mu_c, alpha_c, beta_c, _gamma_c) = result_clean.unwrap();
         let tau_clean = post_hoc_tau(&y.view(), &d.view(), mu_c, &alpha_c, &beta_c, None);
         assert!(tau_clean.is_finite(), "tau should be finite for clean data");
 
         // Case 1: NaN delta at a control position — should be excluded gracefully
         let delta_nan = array![[f64::NAN, 1.0], [1.0, 1.0], [1.0, 1.0]];
-        let result_nan = solve_joint_no_lowrank(&y.view(), &delta_nan.view());
+        let result_nan = solve_joint_no_lowrank(&y.view(), &delta_nan.view(), None);
         assert!(result_nan.is_some(), "NaN delta case should succeed");
-        let (mu_n, alpha_n, beta_n) = result_nan.unwrap();
+        let (mu_n, alpha_n, beta_n, _gamma_n) = result_nan.unwrap();
         let tau_nan = post_hoc_tau(&y.view(), &d.view(), mu_n, &alpha_n, &beta_n, None);
         assert!(tau_nan.is_finite(), "tau should be finite with NaN delta");
 
         // Case 2: Inf delta at a control position — should be excluded gracefully
         let delta_inf = array![[f64::INFINITY, 1.0], [1.0, 1.0], [1.0, 1.0]];
-        let result_inf = solve_joint_no_lowrank(&y.view(), &delta_inf.view());
+        let result_inf = solve_joint_no_lowrank(&y.view(), &delta_inf.view(), None);
         assert!(result_inf.is_some(), "Inf delta case should succeed");
-        let (mu_i, alpha_i, beta_i) = result_inf.unwrap();
+        let (mu_i, alpha_i, beta_i, _gamma_i) = result_inf.unwrap();
         let tau_inf = post_hoc_tau(&y.view(), &d.view(), mu_i, &alpha_i, &beta_i, None);
         assert!(tau_inf.is_finite(), "tau should be finite with Inf delta");
 
         // Case 3: Negative Inf delta
         let delta_ninf = array![[f64::NEG_INFINITY, 1.0], [1.0, 1.0], [1.0, 1.0]];
-        let result_ninf = solve_joint_no_lowrank(&y.view(), &delta_ninf.view());
+        let result_ninf = solve_joint_no_lowrank(&y.view(), &delta_ninf.view(), None);
         assert!(result_ninf.is_some(), "NegInf delta case should succeed");
-        let (mu_ni, alpha_ni, beta_ni) = result_ninf.unwrap();
+        let (mu_ni, alpha_ni, beta_ni, _gamma_ni) = result_ninf.unwrap();
         let tau_ninf = post_hoc_tau(&y.view(), &d.view(), mu_ni, &alpha_ni, &beta_ni, None);
         assert!(tau_ninf.is_finite(), "tau should be finite with NegInf delta");
     }
@@ -1721,7 +1965,7 @@ mod tests {
             [1.0, 1.0, 1.0],
             [1.0, 1.0, 1.0],
             [1.0, 1.0, 1.0],
-            [100.0, 1.0, 1.0]  // (3,0) has weight 100 but Y is NaN
+            [100.0, 1.0, 0.0]  // (3,0) has weight 100 but Y is NaN; (3,2) zeroed for D=1
         ];
 
         let result = solve_joint_with_lowrank(
@@ -1731,11 +1975,12 @@ mod tests {
             0.5,  // lambda_nn
             100,  // max_iter
             1e-6, // tol
+            None,
         );
 
         assert!(result.is_some(), "Should handle NaN in Y with large delta");
 
-        let (mu, alpha, beta, l, tau, _n_iters, _converged) = result.unwrap();
+        let (mu, alpha, beta, l, tau, _n_iters, _converged, _gamma) = result.unwrap();
         assert!(mu.is_finite(), "mu should be finite");
         assert!(alpha.iter().all(|&x| x.is_finite()), "alpha should be finite");
         assert!(beta.iter().all(|&x| x.is_finite()), "beta should be finite");
@@ -1767,8 +2012,8 @@ mod tests {
             [1.0, 1.0, 1.0, 1.0],
             [1.0, 1.0, 1.0, 1.0],
             [1.0, 1.0, 1.0, 1.0],
-            [1.0, 1.0, 1.0, 1.0],
-            [1.0, 1.0, 1.0, 1.0]
+            [1.0, 1.0, 1.0, 0.0],  // (1-D) mask: treated cells zeroed
+            [1.0, 1.0, 1.0, 0.0]
         ];
 
         // max_iter=1 with a non-trivial lambda_nn: very unlikely to converge
@@ -1777,10 +2022,11 @@ mod tests {
             0.5,  // lambda_nn
             1,    // max_iter = 1
             1e-12, // very tight tol
+            None,
         );
 
         assert!(result.is_some(), "Should return Some even if not converged");
-        let (_mu, _alpha, _beta, _l, _tau, n_iters, converged) = result.unwrap();
+        let (_mu, _alpha, _beta, _l, _tau, n_iters, converged, _gamma) = result.unwrap();
 
         // With max_iter=1, should have exactly 1 iteration
         assert_eq!(n_iters, 1, "Should report exactly 1 iteration");
@@ -1809,17 +2055,17 @@ mod tests {
             [1.0, 1.0, 1.0],
             [1.0, 1.0, 1.0],
             [1.0, 1.0, 1.0],
-            [1.0, 1.0, 1.0]
+            [1.0, 1.0, 0.0]  // (1-D) mask: treated cell zeroed
         ];
 
         let max_iter = 1000;
         let result = solve_joint_with_lowrank(
             &y.view(), &d.view(), &delta.view(),
-            0.1, max_iter, 1e-6,
+            0.1, max_iter, 1e-6, None,
         );
 
         assert!(result.is_some());
-        let (_mu, _alpha, _beta, _l, _tau, n_iters, converged) = result.unwrap();
+        let (_mu, _alpha, _beta, _l, _tau, n_iters, converged, _gamma) = result.unwrap();
 
         // Should converge well before max_iter for this simple case
         assert!(converged, "Should converge for simple panel data");
@@ -1858,21 +2104,21 @@ mod tests {
             [1.0, 1.0],
             [1.0, 1.0],
             [1.0, 1.0],
-            [1.0, 1.0]
+            [1.0, 0.0]  // (1-D) mask: treated cell zeroed
         ];
 
         let result_clean = solve_joint_with_lowrank(
-            &y_clean.view(), &d.view(), &delta.view(), 0.5, 100, 1e-6,
+            &y_clean.view(), &d.view(), &delta.view(), 0.5, 100, 1e-6, None,
         );
         let result_nan = solve_joint_with_lowrank(
-            &y_nan.view(), &d.view(), &delta.view(), 0.5, 100, 1e-6,
+            &y_nan.view(), &d.view(), &delta.view(), 0.5, 100, 1e-6, None,
         );
 
         assert!(result_clean.is_some());
         assert!(result_nan.is_some());
 
-        let (_, _, _, _, tau_clean, _, _) = result_clean.unwrap();
-        let (_, _, _, _, tau_nan, _, _) = result_nan.unwrap();
+        let (_, _, _, _, tau_clean, _, _, _) = result_clean.unwrap();
+        let (_, _, _, _, tau_nan, _, _, _) = result_nan.unwrap();
 
         // Both should produce finite tau
         assert!(tau_clean.is_finite());
@@ -1897,9 +2143,11 @@ mod tests {
             1e-6,
             None,
             None,
+            None,
+            None,
         );
 
-        let (alpha, beta, l, _n_iters, _converged) = result.unwrap();
+        let (alpha, beta, l, _n_iters, _converged, _gamma) = result.unwrap();
 
         // Compute fitted values: Y_hat = alpha + beta + L
         let mut y_hat = Array2::<f64>::zeros((3, 2));
@@ -1965,13 +2213,13 @@ mod proptests {
 
             let result = estimate_model(
                 &y.view(), &mask.view(), &w.view(),
-                lambda_nn, 5, 4, 100, 1e-6, None, None,
+                lambda_nn, 5, 4, 100, 1e-6, None, None, None, None,
             );
 
             prop_assert!(result.is_some(),
                 "estimate_model should always return Some for valid all-control panel");
 
-            let (_alpha, _beta, _l, n_iters, _converged) = result.unwrap();
+            let (_alpha, _beta, _l, n_iters, _converged, _gamma) = result.unwrap();
             prop_assert!(n_iters > 0, "Should have at least 1 iteration");
             prop_assert!(n_iters <= 100, "Should not exceed max_iter=100");
         }
@@ -1987,10 +2235,10 @@ mod proptests {
 
             let result = estimate_model(
                 &y.view(), &mask.view(), &w.view(),
-                lambda_nn, 6, 5, 100, 1e-6, None, None,
+                lambda_nn, 6, 5, 100, 1e-6, None, None, None, None,
             );
 
-            let (alpha, beta, l, _n_iters, _converged) = result.unwrap();
+            let (alpha, beta, l, _n_iters, _converged, _gamma) = result.unwrap();
             prop_assert_eq!(alpha.len(), 5, "alpha should have n_units elements");
             prop_assert_eq!(beta.len(), 6, "beta should have n_periods elements");
             prop_assert_eq!(l.shape(), &[6, 5], "L should be n_periods x n_units");
@@ -2007,10 +2255,10 @@ mod proptests {
 
             let result = estimate_model(
                 &y.view(), &mask.view(), &w.view(),
-                lambda_nn, 5, 4, 100, 1e-6, None, None,
+                lambda_nn, 5, 4, 100, 1e-6, None, None, None, None,
             );
 
-            let (alpha, beta, l, _n_iters, _converged) = result.unwrap();
+            let (alpha, beta, l, _n_iters, _converged, _gamma) = result.unwrap();
 
             for &v in alpha.iter() {
                 prop_assert!(v.is_finite(), "alpha contains non-finite: {}", v);
@@ -2035,15 +2283,15 @@ mod proptests {
 
             let result_1 = estimate_model(
                 &y.view(), &mask.view(), &w.view(),
-                lambda_nn, 5, 4, 1, 1e-6, None, None,
+                lambda_nn, 5, 4, 1, 1e-6, None, None, None, None,
             );
             let result_100 = estimate_model(
                 &y.view(), &mask.view(), &w.view(),
-                lambda_nn, 5, 4, 100, 1e-6, None, None,
+                lambda_nn, 5, 4, 100, 1e-6, None, None, None, None,
             );
 
-            let (a1, b1, l1, n_iters_1, _conv1) = result_1.unwrap();
-            let (a100, b100, l100, n_iters_100, _conv100) = result_100.unwrap();
+            let (a1, b1, l1, n_iters_1, _conv1, _g1) = result_1.unwrap();
+            let (a100, b100, l100, n_iters_100, _conv100, _g100) = result_100.unwrap();
 
             // Verify iteration counts are meaningful
             prop_assert_eq!(n_iters_1, 1, "max_iter=1 should give exactly 1 iteration");
@@ -2082,15 +2330,15 @@ mod proptests {
 
             let result_low = estimate_model(
                 &y.view(), &mask.view(), &w.view(),
-                0.01, 5, 4, 100, 1e-6, None, None,
+                0.01, 5, 4, 100, 1e-6, None, None, None, None,
             );
             let result_high = estimate_model(
                 &y.view(), &mask.view(), &w.view(),
-                10.0, 5, 4, 100, 1e-6, None, None,
+                10.0, 5, 4, 100, 1e-6, None, None, None, None,
             );
 
-            let (_, _, l_low, _, _) = result_low.unwrap();
-            let (_, _, l_high, _, _) = result_high.unwrap();
+            let (_, _, l_low, _, _, _) = result_low.unwrap();
+            let (_, _, l_high, _, _, _) = result_high.unwrap();
 
             let norm_low: f64 = l_low.iter().map(|x| x * x).sum::<f64>().sqrt();
             let norm_high: f64 = l_high.iter().map(|x| x * x).sum::<f64>().sqrt();

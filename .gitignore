@@ -3,6 +3,9 @@
 *.smcl
 *.gph
 
+# Build logs
+_*.log
+
 # Build/cache artifacts
 __pycache__/
 *.pyc
@@ -15,6 +18,7 @@ __pycache__/
 *.dylib
 *.a
 rust/target/
+rust/out.txt
 
 # IDE settings
 .vscode/
@@ -23,12 +27,22 @@ rust/target/
 *.swo
 *~
 
-# macOS
+# macOS artifacts
 .DS_Store
+* 2*
+* 3*
+*.plugin.dSYM/
+
+# Temporary/debug files
+_*.do
 
 # Test results
 test_results/
 *.dta.bak
+
+# Generated test data
+data/simulated_*.dta
+data/survey_test_*.dta
 
 # Development-only directories (not part of the distributed package)
 python/

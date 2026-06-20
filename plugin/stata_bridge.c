@@ -66,6 +66,8 @@ TropCommand parse_command(const char *cmd) {
     if (strcmp(cmd, "estimate_joint") == 0) return CMD_ESTIMATE_JOINT;
     if (strcmp(cmd, "bootstrap_twostep") == 0) return CMD_BOOTSTRAP_TWOSTEP;
     if (strcmp(cmd, "bootstrap_joint") == 0) return CMD_BOOTSTRAP_JOINT;
+    if (strcmp(cmd, "bootstrap_rao_wu_twostep") == 0) return CMD_BOOTSTRAP_RAO_WU_TWOSTEP;
+    if (strcmp(cmd, "bootstrap_rao_wu_joint") == 0) return CMD_BOOTSTRAP_RAO_WU_JOINT;
     if (strcmp(cmd, "distance_matrix") == 0) return CMD_DISTANCE_MATRIX;
     
     return CMD_UNKNOWN;
@@ -554,7 +556,9 @@ static ST_retcode handle_loocv_twostep(void) {
     double *lambda_time_grid = NULL;
     double *lambda_unit_grid = NULL;
     double *lambda_nn_grid = NULL;
+    double *x_buf = NULL;
     int lambda_time_len, lambda_unit_len, lambda_nn_len;
+    int n_covariates = 0;
     double max_iter_d, tol;
     int max_iter;
     double best_time, best_unit, best_nn, best_score;
@@ -627,19 +631,64 @@ static ST_retcode handle_loocv_twostep(void) {
     SF_scal_use("__trop_tol", &tol);
     
     max_iter = (int)max_iter_d;
-    
-    rust_rc = stata_loocv_grid_search(
-        y_matrix, d_matrix, control_mask, time_dist,
-        n_periods, n_units,
-        lambda_time_grid, lambda_time_len,
-        lambda_unit_grid, lambda_unit_len,
-        lambda_nn_grid, lambda_nn_len,
-        max_iter, tol,
-        &best_time, &best_unit, &best_nn, &best_score,
-        &n_valid, &n_attempted,
-        &first_failed_t, &first_failed_i,
-        &stage1_time, &stage1_unit, &stage1_nn
-    );
+
+    /* --- Covariate support --- */
+    {
+        double nc_val = 0;
+        if (SF_scal_use("__trop_n_covariates", &nc_val) == 0 && nc_val > 0) {
+            n_covariates = (int)nc_val;
+        }
+    }
+    if (n_covariates > 0) {
+        int n_obs = (int)n_periods * (int)n_units;
+        x_buf = (double *)malloc((size_t)n_obs * (size_t)n_covariates * sizeof(double));
+        if (!x_buf) {
+            TROP_LOG_ERROR("covariate memory allocation failed");
+            rc = TROP_ERR_MEMORY;
+            goto cleanup;
+        }
+        {
+            int row, col;
+            double val;
+            for (col = 0; col < n_covariates; col++) {
+                for (row = 0; row < n_obs; row++) {
+                    if (SF_mat_el("__trop_covariates", row + 1, col + 1, &val) != 0) {
+                        val = 0.0;
+                    }
+                    x_buf[row + col * n_obs] = val;
+                }
+            }
+        }
+    }
+
+    if (n_covariates > 0) {
+        rust_rc = stata_loocv_grid_search_with_covariates(
+            y_matrix, d_matrix, control_mask, time_dist,
+            n_periods, n_units,
+            lambda_time_grid, lambda_time_len,
+            lambda_unit_grid, lambda_unit_len,
+            lambda_nn_grid, lambda_nn_len,
+            max_iter, tol,
+            &best_time, &best_unit, &best_nn, &best_score,
+            &n_valid, &n_attempted,
+            &first_failed_t, &first_failed_i,
+            &stage1_time, &stage1_unit, &stage1_nn,
+            x_buf, n_covariates
+        );
+    } else {
+        rust_rc = stata_loocv_grid_search(
+            y_matrix, d_matrix, control_mask, time_dist,
+            n_periods, n_units,
+            lambda_time_grid, lambda_time_len,
+            lambda_unit_grid, lambda_unit_len,
+            lambda_nn_grid, lambda_nn_len,
+            max_iter, tol,
+            &best_time, &best_unit, &best_nn, &best_score,
+            &n_valid, &n_attempted,
+            &first_failed_t, &first_failed_i,
+            &stage1_time, &stage1_unit, &stage1_nn
+        );
+    }
     
     if (rust_rc != TROP_SUCCESS) {
         translate_error_code(rust_rc);
@@ -676,6 +725,7 @@ cleanup:
     free(lambda_time_grid);
     free(lambda_unit_grid);
     free(lambda_nn_grid);
+    free(x_buf);
     
     return rc;
 }
@@ -701,7 +751,9 @@ static ST_retcode handle_loocv_twostep_exhaustive(void) {
     double *lambda_time_grid = NULL;
     double *lambda_unit_grid = NULL;
     double *lambda_nn_grid = NULL;
+    double *x_buf = NULL;
     int lambda_time_len, lambda_unit_len, lambda_nn_len;
+    int n_covariates = 0;
     double max_iter_d, tol;
     int max_iter;
     double best_time, best_unit, best_nn, best_score;
@@ -771,18 +823,62 @@ static ST_retcode handle_loocv_twostep_exhaustive(void) {
 
     max_iter = (int)max_iter_d;
 
+    /* --- Covariate support --- */
+    {
+        double nc_val = 0;
+        if (SF_scal_use("__trop_n_covariates", &nc_val) == 0 && nc_val > 0) {
+            n_covariates = (int)nc_val;
+        }
+    }
+    if (n_covariates > 0) {
+        int n_obs = (int)n_periods * (int)n_units;
+        x_buf = (double *)malloc((size_t)n_obs * (size_t)n_covariates * sizeof(double));
+        if (!x_buf) {
+            TROP_LOG_ERROR("covariate memory allocation failed");
+            rc = TROP_ERR_MEMORY;
+            goto cleanup;
+        }
+        {
+            int row, col;
+            double val;
+            for (col = 0; col < n_covariates; col++) {
+                for (row = 0; row < n_obs; row++) {
+                    if (SF_mat_el("__trop_covariates", row + 1, col + 1, &val) != 0) {
+                        val = 0.0;
+                    }
+                    x_buf[row + col * n_obs] = val;
+                }
+            }
+        }
+    }
+
     /* Call Rust: exhaustive Cartesian search over the full grid. */
-    rust_rc = stata_loocv_grid_search_exhaustive(
-        y_matrix, d_matrix, control_mask, time_dist,
-        n_periods, n_units,
-        lambda_time_grid, lambda_time_len,
-        lambda_unit_grid, lambda_unit_len,
-        lambda_nn_grid, lambda_nn_len,
-        max_iter, tol,
-        &best_time, &best_unit, &best_nn, &best_score,
-        &n_valid, &n_attempted,
-        &first_failed_t, &first_failed_i
-    );
+    if (n_covariates > 0) {
+        rust_rc = stata_loocv_grid_search_exhaustive_with_covariates(
+            y_matrix, d_matrix, control_mask, time_dist,
+            n_periods, n_units,
+            lambda_time_grid, lambda_time_len,
+            lambda_unit_grid, lambda_unit_len,
+            lambda_nn_grid, lambda_nn_len,
+            max_iter, tol,
+            &best_time, &best_unit, &best_nn, &best_score,
+            &n_valid, &n_attempted,
+            &first_failed_t, &first_failed_i,
+            x_buf, n_covariates
+        );
+    } else {
+        rust_rc = stata_loocv_grid_search_exhaustive(
+            y_matrix, d_matrix, control_mask, time_dist,
+            n_periods, n_units,
+            lambda_time_grid, lambda_time_len,
+            lambda_unit_grid, lambda_unit_len,
+            lambda_nn_grid, lambda_nn_len,
+            max_iter, tol,
+            &best_time, &best_unit, &best_nn, &best_score,
+            &n_valid, &n_attempted,
+            &first_failed_t, &first_failed_i
+        );
+    }
 
     if (rust_rc != TROP_SUCCESS) {
         translate_error_code(rust_rc);
@@ -813,9 +909,11 @@ cleanup:
     free(lambda_time_grid);
     free(lambda_unit_grid);
     free(lambda_nn_grid);
+    free(x_buf);
 
     return rc;
 }
+
 
 /* ============================================================================
  * Command Handler: LOOCV Joint
@@ -1102,8 +1200,11 @@ static ST_retcode handle_estimate_twostep(void) {
     int *converged_by_obs = NULL;
     int *n_iters_by_obs = NULL;
     double *unit_weights = NULL;
+    double *x_buf = NULL;
+    double *gamma_buf = NULL;
     int unit_weights_len = 0;
     int use_weights = 0;
+    int n_covariates = 0;
     double use_weights_d = 0.0;
     double lambda_time, lambda_unit, lambda_nn;
     double max_iter_d, tol;
@@ -1189,7 +1290,37 @@ static ST_retcode handle_estimate_twostep(void) {
         }
     }
 
-    /* Call Rust function (weighted or unweighted) */
+    /* --- Covariate support --- */
+    {
+        double nc_val = 0;
+        if (SF_scal_use("__trop_n_covariates", &nc_val) == 0 && nc_val > 0) {
+            n_covariates = (int)nc_val;
+        }
+    }
+    if (n_covariates > 0) {
+        int n_obs = (int)n_periods * (int)n_units;
+        x_buf = (double *)malloc((size_t)n_obs * (size_t)n_covariates * sizeof(double));
+        gamma_buf = (double *)calloc((size_t)n_covariates, sizeof(double));
+        if (!x_buf || !gamma_buf) {
+            TROP_LOG_ERROR("covariate memory allocation failed");
+            rc = TROP_ERR_MEMORY;
+            goto cleanup;
+        }
+        {
+            int row, col;
+            double val;
+            for (col = 0; col < n_covariates; col++) {
+                for (row = 0; row < n_obs; row++) {
+                    if (SF_mat_el("__trop_covariates", row + 1, col + 1, &val) != 0) {
+                        val = 0.0;
+                    }
+                    x_buf[row + col * n_obs] = val;
+                }
+            }
+        }
+    }
+
+    /* Call Rust function (weighted, covariate, or plain) */
     if (use_weights) {
         rust_rc = stata_estimate_twostep_weighted(
             y_matrix, d_matrix, control_mask, time_dist,
@@ -1200,6 +1331,17 @@ static ST_retcode handle_estimate_twostep(void) {
             &n_treated, &n_iterations, &converged,
             converged_by_obs, n_iters_by_obs,
             unit_weights
+        );
+    } else if (n_covariates > 0) {
+        rust_rc = stata_estimate_twostep_with_covariates(
+            y_matrix, d_matrix, control_mask, time_dist,
+            n_periods, n_units,
+            lambda_time, lambda_unit, lambda_nn,
+            max_iter, tol,
+            &att, tau, alpha, beta, l_matrix,
+            &n_treated, &n_iterations, &converged,
+            converged_by_obs, n_iters_by_obs,
+            x_buf, n_covariates, gamma_buf
         );
     } else {
         rust_rc = stata_estimate_twostep(
@@ -1283,6 +1425,16 @@ static ST_retcode handle_estimate_twostep(void) {
     /* Write L matrix (low-rank factor matrix) */
     rc = write_matrix_to_stata("__trop_factor_matrix", l_matrix, n_periods, n_units);
     if (rc != TROP_SUCCESS) goto cleanup;
+
+    /* Write gamma (covariate coefficients) if estimated.
+       __trop_gamma is pre-allocated as 1 x p (row vector, Stata convention).
+       Store into row=1, col=j+1. */
+    if (n_covariates > 0 && gamma_buf != NULL) {
+        int j;
+        for (j = 0; j < n_covariates; j++) {
+            SF_mat_store("__trop_gamma", 1, j + 1, gamma_buf[j]);
+        }
+    }
     
     TROP_LOG_INFO("estimation complete: ATT=%g, n_treated=%d, converged=%d",
                   att, n_treated, converged);
@@ -1354,6 +1506,8 @@ cleanup:
     free(converged_by_obs);
     free(n_iters_by_obs);
     free(unit_weights);
+    free(x_buf);
+    free(gamma_buf);
     
     return rc;
 }
@@ -1371,8 +1525,11 @@ static ST_retcode handle_estimate_joint(void) {
     double *l_matrix = NULL;
     double *tau_vec = NULL;
     double *unit_weights = NULL;
+    double *x_buf = NULL;
+    double *gamma_buf = NULL;
     int unit_weights_len = 0;
     int use_weights = 0;
+    int n_covariates = 0;
     double use_weights_d = 0.0;
     double lambda_time, lambda_unit, lambda_nn;
     double max_iter_d, tol;
@@ -1439,7 +1596,37 @@ static ST_retcode handle_estimate_joint(void) {
         }
     }
 
-    /* Call Rust function (weighted or unweighted) */
+    /* --- Covariate support --- */
+    {
+        double nc_val = 0;
+        if (SF_scal_use("__trop_n_covariates", &nc_val) == 0 && nc_val > 0) {
+            n_covariates = (int)nc_val;
+        }
+    }
+    if (n_covariates > 0) {
+        int n_obs = (int)n_periods * (int)n_units;
+        x_buf = (double *)malloc((size_t)n_obs * (size_t)n_covariates * sizeof(double));
+        gamma_buf = (double *)calloc((size_t)n_covariates, sizeof(double));
+        if (!x_buf || !gamma_buf) {
+            TROP_LOG_ERROR("covariate memory allocation failed");
+            rc = TROP_ERR_MEMORY;
+            goto cleanup;
+        }
+        {
+            int row, col;
+            double val;
+            for (col = 0; col < n_covariates; col++) {
+                for (row = 0; row < n_obs; row++) {
+                    if (SF_mat_el("__trop_covariates", row + 1, col + 1, &val) != 0) {
+                        val = 0.0;
+                    }
+                    x_buf[row + col * n_obs] = val;
+                }
+            }
+        }
+    }
+
+    /* Call Rust function (weighted, covariate, or plain) */
     if (use_weights) {
         rust_rc = stata_estimate_joint_weighted(
             y_matrix, d_matrix,
@@ -1450,6 +1637,17 @@ static ST_retcode handle_estimate_joint(void) {
             &n_iterations, &converged,
             tau_vec, &n_treated_cells,
             unit_weights
+        );
+    } else if (n_covariates > 0) {
+        rust_rc = stata_estimate_joint_with_covariates(
+            y_matrix, d_matrix,
+            n_periods, n_units,
+            lambda_time, lambda_unit, lambda_nn,
+            max_iter, tol,
+            &tau, &mu, alpha, beta, l_matrix,
+            &n_iterations, &converged,
+            tau_vec, &n_treated_cells,
+            x_buf, n_covariates, gamma_buf
         );
     } else {
         rust_rc = stata_estimate_joint(
@@ -1523,6 +1721,16 @@ static ST_retcode handle_estimate_joint(void) {
     
     rc = write_matrix_to_stata("__trop_factor_matrix", l_matrix, n_periods, n_units);
     if (rc != TROP_SUCCESS) goto cleanup;
+
+    /* Write gamma (covariate coefficients) if estimated.
+       __trop_gamma is pre-allocated as 1 x p (row vector, Stata convention).
+       Store into row=1, col=j+1. */
+    if (n_covariates > 0 && gamma_buf != NULL) {
+        int j;
+        for (j = 0; j < n_covariates; j++) {
+            SF_mat_store("__trop_gamma", 1, j + 1, gamma_buf[j]);
+        }
+    }
     
     TROP_LOG_INFO("estimation complete: tau=%g, mu=%g, converged=%d",
                   tau, mu, converged);
@@ -1590,8 +1798,10 @@ static ST_retcode handle_bootstrap_twostep(void) {
     int64_t *time_dist = NULL;
     double *estimates = NULL;
     double *unit_weights = NULL;
+    double *x_buf = NULL;
     int unit_weights_len = 0;
     int use_weights = 0;
+    int n_covariates = 0;
     double use_weights_d = 0.0;
     double lambda_time, lambda_unit, lambda_nn;
     double n_bootstrap_d, max_iter_d, tol, seed_d, alpha_d, ddof_d;
@@ -1689,7 +1899,36 @@ static ST_retcode handle_bootstrap_twostep(void) {
         }
     }
 
-    /* Call Rust bootstrap function (weighted or unweighted) */
+    /* --- Covariate support --- */
+    {
+        double nc_val = 0;
+        if (SF_scal_use("__trop_n_covariates", &nc_val) == 0 && nc_val > 0) {
+            n_covariates = (int)nc_val;
+        }
+    }
+    if (n_covariates > 0) {
+        int n_obs = (int)n_periods * (int)n_units;
+        x_buf = (double *)malloc((size_t)n_obs * (size_t)n_covariates * sizeof(double));
+        if (!x_buf) {
+            TROP_LOG_ERROR("covariate memory allocation failed");
+            rc = TROP_ERR_MEMORY;
+            goto cleanup;
+        }
+        {
+            int row, col;
+            double val;
+            for (col = 0; col < n_covariates; col++) {
+                for (row = 0; row < n_obs; row++) {
+                    if (SF_mat_el("__trop_covariates", row + 1, col + 1, &val) != 0) {
+                        val = 0.0;
+                    }
+                    x_buf[row + col * n_obs] = val;
+                }
+            }
+        }
+    }
+
+    /* Call Rust bootstrap function (weighted, covariate, or plain) */
     if (use_weights) {
         rust_rc = stata_bootstrap_trop_variance_weighted(
             y_matrix, d_matrix, control_mask, time_dist,
@@ -1698,6 +1937,15 @@ static ST_retcode handle_bootstrap_twostep(void) {
             n_bootstrap, max_iter, tol, seed, alpha, ddof,
             estimates, &se, &ci_lower_pct, &ci_upper_pct, &n_valid,
             unit_weights
+        );
+    } else if (n_covariates > 0) {
+        rust_rc = stata_bootstrap_trop_variance_with_covariates(
+            y_matrix, d_matrix, control_mask, time_dist,
+            n_periods, n_units,
+            lambda_time, lambda_unit, lambda_nn,
+            n_bootstrap, max_iter, tol, seed, alpha, ddof,
+            estimates, &se, &ci_lower_pct, &ci_upper_pct, &n_valid,
+            x_buf, n_covariates
         );
     } else {
         rust_rc = stata_bootstrap_trop_variance(
@@ -1752,6 +2000,7 @@ cleanup:
     free(time_dist);
     free(estimates);
     free(unit_weights);
+    free(x_buf);
     
     return rc;
 }
@@ -1766,6 +2015,8 @@ static ST_retcode handle_bootstrap_joint(void) {
     double *d_matrix = NULL;
     double *estimates = NULL;
     double *unit_weights = NULL;
+    double *x_buf = NULL;
+    int n_covariates = 0;
     int unit_weights_len = 0;
     int use_weights = 0;
     double use_weights_d = 0.0;
@@ -1856,7 +2107,36 @@ static ST_retcode handle_bootstrap_joint(void) {
         }
     }
 
-    /* Call Rust bootstrap function (weighted or unweighted) */
+    /* --- Covariate support --- */
+    {
+        double nc_val = 0;
+        if (SF_scal_use("__trop_n_covariates", &nc_val) == 0 && nc_val > 0) {
+            n_covariates = (int)nc_val;
+        }
+    }
+    if (n_covariates > 0) {
+        int n_obs = (int)n_periods * (int)n_units;
+        x_buf = (double *)malloc((size_t)n_obs * (size_t)n_covariates * sizeof(double));
+        if (!x_buf) {
+            TROP_LOG_ERROR("covariate memory allocation failed");
+            rc = TROP_ERR_MEMORY;
+            goto cleanup;
+        }
+        {
+            int row, col;
+            double val;
+            for (col = 0; col < n_covariates; col++) {
+                for (row = 0; row < n_obs; row++) {
+                    if (SF_mat_el("__trop_covariates", row + 1, col + 1, &val) != 0) {
+                        val = 0.0;
+                    }
+                    x_buf[row + col * n_obs] = val;
+                }
+            }
+        }
+    }
+
+    /* Call Rust bootstrap function (weighted / covariates / plain) */
     if (use_weights) {
         rust_rc = stata_bootstrap_trop_variance_joint_weighted(
             y_matrix, d_matrix,
@@ -1865,6 +2145,15 @@ static ST_retcode handle_bootstrap_joint(void) {
             n_bootstrap, max_iter, tol, seed, alpha, ddof,
             estimates, &se, &ci_lower_pct, &ci_upper_pct, &n_valid,
             unit_weights
+        );
+    } else if (n_covariates > 0) {
+        rust_rc = stata_bootstrap_trop_variance_joint_with_covariates(
+            y_matrix, d_matrix,
+            n_periods, n_units,
+            lambda_time, lambda_unit, lambda_nn,
+            n_bootstrap, max_iter, tol, seed, alpha, ddof,
+            estimates, &se, &ci_lower_pct, &ci_upper_pct, &n_valid,
+            x_buf, n_covariates
         );
     } else {
         rust_rc = stata_bootstrap_trop_variance_joint(
@@ -1916,6 +2205,394 @@ cleanup:
     free(y_matrix);
     free(d_matrix);
     free(estimates);
+    free(unit_weights);
+    free(x_buf);
+    
+    return rc;
+}
+
+/* ============================================================================
+ * Command Handler: Bootstrap Rao-Wu Twostep
+ * ============================================================================ */
+
+static ST_retcode handle_bootstrap_rao_wu_twostep(void) {
+    ST_int n_units, n_periods;
+    double *y_matrix = NULL;
+    double *d_matrix = NULL;
+    unsigned char *control_mask = NULL;
+    int64_t *time_dist = NULL;
+    double *estimates = NULL;
+    int64_t *strata = NULL;
+    int64_t *psu = NULL;
+    double *fpc = NULL;
+    double *unit_weights = NULL;
+    int strata_len = 0, psu_len = 0, fpc_len = 0, uw_len = 0;
+    double lambda_time, lambda_unit, lambda_nn;
+    double n_bootstrap_d, max_iter_d, tol, seed_d, alpha_d, ddof_d;
+    int n_bootstrap, max_iter, ddof;
+    uint64_t seed;
+    double se, alpha;
+    double ci_lower_pct, ci_upper_pct;
+    int n_valid;
+    ST_retcode rc;
+    int rust_rc;
+    
+    TROP_LOG_INFO("starting Rao-Wu bootstrap variance estimation (twostep)");
+    
+    /* Read dimensions */
+    rc = read_dimensions(&n_units, &n_periods);
+    if (rc != TROP_SUCCESS) goto cleanup_rw_ts;
+    
+    /* Read bootstrap parameters */
+    SF_scal_use("__trop_n_bootstrap", &n_bootstrap_d);
+    n_bootstrap = (int)n_bootstrap_d;
+    
+    if (SF_scal_use("__trop_bs_alpha", &alpha_d) != 0) {
+        alpha = 0.05;
+    } else {
+        alpha = alpha_d;
+    }
+
+    if (SF_scal_use("__trop_bs_ddof", &ddof_d) != 0) {
+        ddof = 1;
+    } else {
+        ddof = ((int)ddof_d == 0) ? 0 : 1;
+    }
+    
+    /* Allocate memory for panel data */
+    y_matrix = (double *)malloc(n_units * n_periods * sizeof(double));
+    d_matrix = (double *)malloc(n_units * n_periods * sizeof(double));
+    control_mask = (unsigned char *)malloc(n_units * n_periods);
+    time_dist = (int64_t *)malloc(n_periods * n_periods * sizeof(int64_t));
+    estimates = (double *)malloc(n_bootstrap * sizeof(double));
+    
+    if (!y_matrix || !d_matrix || !control_mask || !time_dist || !estimates) {
+        TROP_LOG_ERROR("memory allocation failed");
+        rc = TROP_ERR_MEMORY;
+        goto cleanup_rw_ts;
+    }
+    
+    /* Read data matrices */
+    double y_idx_d, d_idx_d, ctrl_idx_d;
+    SF_scal_use("__trop_y_varindex", &y_idx_d);
+    SF_scal_use("__trop_d_varindex", &d_idx_d);
+    SF_scal_use("__trop_ctrl_varindex", &ctrl_idx_d);
+    
+    rc = read_panel_to_matrix((ST_int)y_idx_d, n_periods, n_units, y_matrix);
+    if (rc != TROP_SUCCESS) goto cleanup_rw_ts;
+    
+    rc = read_panel_to_matrix((ST_int)d_idx_d, n_periods, n_units, d_matrix);
+    if (rc != TROP_SUCCESS) goto cleanup_rw_ts;
+    
+    rc = read_control_mask((ST_int)ctrl_idx_d, n_periods, n_units, control_mask);
+    if (rc != TROP_SUCCESS) goto cleanup_rw_ts;
+    
+    rc = read_time_dist_matrix("__trop_time_dist", n_periods, time_dist);
+    if (rc != TROP_SUCCESS) goto cleanup_rw_ts;
+    
+    /* Read parameters */
+    SF_scal_use("__trop_lambda_time", &lambda_time);
+    SF_scal_use("__trop_lambda_unit", &lambda_unit);
+    SF_scal_use("__trop_lambda_nn", &lambda_nn);
+    SF_scal_use("__trop_max_iter", &max_iter_d);
+    SF_scal_use("__trop_tol", &tol);
+    SF_scal_use("__trop_seed", &seed_d);
+    
+    max_iter = (int)max_iter_d;
+    seed = (uint64_t)seed_d;
+    
+    /* Read survey design matrices */
+    {
+        double *strata_d = NULL;
+        double *psu_d = NULL;
+        int i;
+        
+        rc = read_lambda_grid("__trop_strata", &strata_d, &strata_len);
+        if (rc != TROP_SUCCESS) goto cleanup_rw_ts;
+        
+        rc = read_lambda_grid("__trop_psu", &psu_d, &psu_len);
+        if (rc != TROP_SUCCESS) { free(strata_d); goto cleanup_rw_ts; }
+        
+        /* Convert double arrays to int64_t */
+        strata = (int64_t *)malloc(strata_len * sizeof(int64_t));
+        psu = (int64_t *)malloc(psu_len * sizeof(int64_t));
+        if (!strata || !psu) {
+            free(strata_d); free(psu_d);
+            rc = TROP_ERR_MEMORY;
+            goto cleanup_rw_ts;
+        }
+        for (i = 0; i < strata_len; i++) strata[i] = (int64_t)strata_d[i];
+        for (i = 0; i < psu_len; i++) psu[i] = (int64_t)psu_d[i];
+        free(strata_d);
+        free(psu_d);
+    }
+    
+    /* Read FPC (may be empty/0-row → pass NULL to Rust) */
+    {
+        double *fpc_tmp = NULL;
+        rc = read_lambda_grid("__trop_fpc", &fpc_tmp, &fpc_len);
+        if (rc != TROP_SUCCESS || fpc_len == 0) {
+            fpc = NULL;
+            free(fpc_tmp);
+            if (rc != TROP_SUCCESS) rc = TROP_SUCCESS; /* empty FPC is OK */
+        } else {
+            fpc = fpc_tmp;
+        }
+    }
+    
+    /* Read unit weights (Mata layer guarantees this matrix always exists) */
+    rc = read_lambda_grid("__trop_unit_weights", &unit_weights, &uw_len);
+    if (rc != TROP_SUCCESS || unit_weights == NULL || uw_len == 0) {
+        SF_error("internal error: __trop_unit_weights matrix missing or unreadable\n");
+        rc = 198;
+        goto cleanup_rw_ts;
+    }
+    if (uw_len != (int)n_units) {
+        TROP_LOG_ERROR("unit_weights length %d != n_units %d", uw_len, (int)n_units);
+        SF_error("internal error: __trop_unit_weights wrong size\n");
+        rc = TROP_ERR_INVALID_DIM;
+        goto cleanup_rw_ts;
+    }
+    
+    TROP_LOG_DEBUG("rao_wu_twostep params: n_bootstrap=%d, seed=%llu, alpha=%g",
+                   n_bootstrap, (unsigned long long)seed, alpha);
+
+    /* Call Rust Rao-Wu bootstrap */
+    rust_rc = stata_bootstrap_trop_variance_rao_wu(
+        y_matrix, d_matrix, control_mask, time_dist,
+        n_periods, n_units,
+        lambda_time, lambda_unit, lambda_nn,
+        n_bootstrap, max_iter, tol, seed, alpha, ddof,
+        strata, psu, fpc, unit_weights,
+        estimates, &se, &ci_lower_pct, &ci_upper_pct, &n_valid
+    );
+    
+    if (rust_rc != TROP_SUCCESS) {
+        translate_error_code(rust_rc);
+        rc = rust_rc;
+        goto cleanup_rw_ts;
+    }
+    
+    /* Write results */
+    SF_scal_save("__trop_se", se);
+    SF_scal_save("__trop_n_bootstrap_valid", (double)n_valid);
+    SF_scal_save("__trop_level", 1.0 - alpha);
+    SF_scal_save("__trop_ci_lower_percentile", ci_lower_pct);
+    SF_scal_save("__trop_ci_upper_percentile", ci_upper_pct);
+    
+    rc = write_vector_to_matrix("__trop_bootstrap_estimates", estimates, n_valid, 0);
+    if (rc != TROP_SUCCESS) goto cleanup_rw_ts;
+    
+    double failure_rate = 1.0 - (double)n_valid / (double)n_bootstrap;
+    if (failure_rate > 0.1) {
+        char warn_msg[256];
+        snprintf(warn_msg, sizeof(warn_msg), 
+                 "warning: %.1f%% of Rao-Wu bootstrap iterations failed (%d/%d valid)\n",
+                 failure_rate * 100.0, n_valid, n_bootstrap);
+        SF_display(warn_msg);
+    }
+    
+    TROP_LOG_INFO("Rao-Wu bootstrap (twostep) complete: SE=%g, n_valid=%d/%d",
+                  se, n_valid, n_bootstrap);
+    
+    rc = TROP_SUCCESS;
+    
+cleanup_rw_ts:
+    free(y_matrix);
+    free(d_matrix);
+    free(control_mask);
+    free(time_dist);
+    free(estimates);
+    free(strata);
+    free(psu);
+    free(fpc);
+    free(unit_weights);
+    
+    return rc;
+}
+
+/* ============================================================================
+ * Command Handler: Bootstrap Rao-Wu Joint
+ * ============================================================================ */
+
+static ST_retcode handle_bootstrap_rao_wu_joint(void) {
+    ST_int n_units, n_periods;
+    double *y_matrix = NULL;
+    double *d_matrix = NULL;
+    double *estimates = NULL;
+    int64_t *strata = NULL;
+    int64_t *psu = NULL;
+    double *fpc = NULL;
+    double *unit_weights = NULL;
+    int strata_len = 0, psu_len = 0, fpc_len = 0, uw_len = 0;
+    double lambda_time, lambda_unit, lambda_nn;
+    double n_bootstrap_d, max_iter_d, tol, seed_d, alpha_d, ddof_d;
+    int n_bootstrap, max_iter, ddof;
+    uint64_t seed;
+    double se, alpha;
+    double ci_lower_pct, ci_upper_pct;
+    int n_valid;
+    ST_retcode rc;
+    int rust_rc;
+    
+    TROP_LOG_INFO("starting Rao-Wu bootstrap variance estimation (joint)");
+    
+    /* Read dimensions */
+    rc = read_dimensions(&n_units, &n_periods);
+    if (rc != TROP_SUCCESS) goto cleanup_rw_jt;
+    
+    /* Read bootstrap parameters */
+    SF_scal_use("__trop_n_bootstrap", &n_bootstrap_d);
+    n_bootstrap = (int)n_bootstrap_d;
+    
+    if (SF_scal_use("__trop_bs_alpha", &alpha_d) != 0) {
+        alpha = 0.05;
+    } else {
+        alpha = alpha_d;
+    }
+
+    if (SF_scal_use("__trop_bs_ddof", &ddof_d) != 0) {
+        ddof = 1;
+    } else {
+        ddof = ((int)ddof_d == 0) ? 0 : 1;
+    }
+    
+    /* Allocate memory for panel data */
+    y_matrix = (double *)malloc(n_units * n_periods * sizeof(double));
+    d_matrix = (double *)malloc(n_units * n_periods * sizeof(double));
+    estimates = (double *)malloc(n_bootstrap * sizeof(double));
+    
+    if (!y_matrix || !d_matrix || !estimates) {
+        TROP_LOG_ERROR("memory allocation failed");
+        rc = TROP_ERR_MEMORY;
+        goto cleanup_rw_jt;
+    }
+    
+    /* Read data matrices */
+    double y_idx_d, d_idx_d;
+    SF_scal_use("__trop_y_varindex", &y_idx_d);
+    SF_scal_use("__trop_d_varindex", &d_idx_d);
+    
+    rc = read_panel_to_matrix((ST_int)y_idx_d, n_periods, n_units, y_matrix);
+    if (rc != TROP_SUCCESS) goto cleanup_rw_jt;
+    
+    rc = read_panel_to_matrix((ST_int)d_idx_d, n_periods, n_units, d_matrix);
+    if (rc != TROP_SUCCESS) goto cleanup_rw_jt;
+    
+    /* Read parameters */
+    SF_scal_use("__trop_lambda_time", &lambda_time);
+    SF_scal_use("__trop_lambda_unit", &lambda_unit);
+    SF_scal_use("__trop_lambda_nn", &lambda_nn);
+    SF_scal_use("__trop_max_iter", &max_iter_d);
+    SF_scal_use("__trop_tol", &tol);
+    SF_scal_use("__trop_seed", &seed_d);
+    
+    max_iter = (int)max_iter_d;
+    seed = (uint64_t)seed_d;
+    
+    /* Read survey design matrices */
+    {
+        double *strata_d = NULL;
+        double *psu_d = NULL;
+        int i;
+        
+        rc = read_lambda_grid("__trop_strata", &strata_d, &strata_len);
+        if (rc != TROP_SUCCESS) goto cleanup_rw_jt;
+        
+        rc = read_lambda_grid("__trop_psu", &psu_d, &psu_len);
+        if (rc != TROP_SUCCESS) { free(strata_d); goto cleanup_rw_jt; }
+        
+        /* Convert double arrays to int64_t */
+        strata = (int64_t *)malloc(strata_len * sizeof(int64_t));
+        psu = (int64_t *)malloc(psu_len * sizeof(int64_t));
+        if (!strata || !psu) {
+            free(strata_d); free(psu_d);
+            rc = TROP_ERR_MEMORY;
+            goto cleanup_rw_jt;
+        }
+        for (i = 0; i < strata_len; i++) strata[i] = (int64_t)strata_d[i];
+        for (i = 0; i < psu_len; i++) psu[i] = (int64_t)psu_d[i];
+        free(strata_d);
+        free(psu_d);
+    }
+    
+    /* Read FPC (may be empty/0-row → pass NULL to Rust) */
+    {
+        double *fpc_tmp = NULL;
+        rc = read_lambda_grid("__trop_fpc", &fpc_tmp, &fpc_len);
+        if (rc != TROP_SUCCESS || fpc_len == 0) {
+            fpc = NULL;
+            free(fpc_tmp);
+            if (rc != TROP_SUCCESS) rc = TROP_SUCCESS; /* empty FPC is OK */
+        } else {
+            fpc = fpc_tmp;
+        }
+    }
+    
+    /* Read unit weights (Mata layer guarantees this matrix always exists) */
+    rc = read_lambda_grid("__trop_unit_weights", &unit_weights, &uw_len);
+    if (rc != TROP_SUCCESS || unit_weights == NULL || uw_len == 0) {
+        SF_error("internal error: __trop_unit_weights matrix missing or unreadable\n");
+        rc = 198;
+        goto cleanup_rw_jt;
+    }
+    if (uw_len != (int)n_units) {
+        TROP_LOG_ERROR("unit_weights length %d != n_units %d", uw_len, (int)n_units);
+        SF_error("internal error: __trop_unit_weights wrong size\n");
+        rc = TROP_ERR_INVALID_DIM;
+        goto cleanup_rw_jt;
+    }
+    
+    TROP_LOG_DEBUG("rao_wu_joint params: n_bootstrap=%d, seed=%llu, alpha=%g",
+                   n_bootstrap, (unsigned long long)seed, alpha);
+
+    /* Call Rust Rao-Wu bootstrap (joint) */
+    rust_rc = stata_bootstrap_trop_variance_rao_wu_joint(
+        y_matrix, d_matrix,
+        n_periods, n_units,
+        lambda_time, lambda_unit, lambda_nn,
+        n_bootstrap, max_iter, tol, seed, alpha, ddof,
+        strata, psu, fpc, unit_weights,
+        estimates, &se, &ci_lower_pct, &ci_upper_pct, &n_valid
+    );
+    
+    if (rust_rc != TROP_SUCCESS) {
+        translate_error_code(rust_rc);
+        rc = rust_rc;
+        goto cleanup_rw_jt;
+    }
+    
+    /* Write results */
+    SF_scal_save("__trop_se", se);
+    SF_scal_save("__trop_n_bootstrap_valid", (double)n_valid);
+    SF_scal_save("__trop_level", 1.0 - alpha);
+    SF_scal_save("__trop_ci_lower_percentile", ci_lower_pct);
+    SF_scal_save("__trop_ci_upper_percentile", ci_upper_pct);
+    
+    rc = write_vector_to_matrix("__trop_bootstrap_estimates", estimates, n_valid, 0);
+    if (rc != TROP_SUCCESS) goto cleanup_rw_jt;
+    
+    double failure_rate = 1.0 - (double)n_valid / (double)n_bootstrap;
+    if (failure_rate > 0.1) {
+        char warn_msg[256];
+        snprintf(warn_msg, sizeof(warn_msg), 
+                 "warning: %.1f%% of Rao-Wu bootstrap iterations failed (%d/%d valid)\n",
+                 failure_rate * 100.0, n_valid, n_bootstrap);
+        SF_display(warn_msg);
+    }
+    
+    TROP_LOG_INFO("Rao-Wu bootstrap (joint) complete: SE=%g, n_valid=%d/%d",
+                  se, n_valid, n_bootstrap);
+    
+    rc = TROP_SUCCESS;
+    
+cleanup_rw_jt:
+    free(y_matrix);
+    free(d_matrix);
+    free(estimates);
+    free(strata);
+    free(psu);
+    free(fpc);
     free(unit_weights);
     
     return rc;
@@ -2060,6 +2737,14 @@ STDLL stata_call(int argc, char *argv[]) {
             
         case CMD_BOOTSTRAP_JOINT:
             rc = handle_bootstrap_joint();
+            break;
+            
+        case CMD_BOOTSTRAP_RAO_WU_TWOSTEP:
+            rc = handle_bootstrap_rao_wu_twostep();
+            break;
+            
+        case CMD_BOOTSTRAP_RAO_WU_JOINT:
+            rc = handle_bootstrap_rao_wu_joint();
             break;
             
         case CMD_DISTANCE_MATRIX:

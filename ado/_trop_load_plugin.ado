@@ -4,6 +4,7 @@
     Detects the host operating system and CPU architecture, then searches
     for the corresponding plugin file in the following order:
 
+      0. Same directory as this ado-file (net install layout).
       1. Relative to this ado-file (../plugin/).
       2. c(pwd)/trop_stata/plugin/
       3. c(pwd)/../plugin/
@@ -71,7 +72,25 @@ program define _trop_load_plugin
     // Search for the plugin binary across candidate locations
     local plugin_path ""
 
-    // (1) Relative to this ado-file
+    // (0) Same directory as this ado file (net install places plugin alongside ado)
+    capture findfile _trop_load_plugin.ado
+    if !_rc {
+        local ado_fullpath "`r(fn)'"
+        // Normalize path separators (Windows uses backslash)
+        local ado_fullpath : subinstr local ado_fullpath "\" "/", all
+        // Extract directory containing this ado file
+        local _spos0 = strrpos("`ado_fullpath'", "/")
+        if `_spos0' > 0 {
+            local _ado_dir0 = substr("`ado_fullpath'", 1, `_spos0')
+            capture confirm file "`_ado_dir0'`plugin_name'"
+            if !_rc {
+                local plugin_path "`_ado_dir0'`plugin_name'"
+            }
+        }
+    }
+
+    // (1) Relative to this ado-file (../plugin/ for development layout)
+    if "`plugin_path'" == "" {
     capture findfile _trop_load_plugin.ado
     if !_rc {
         local ado_fullpath "`r(fn)'"
@@ -101,6 +120,7 @@ program define _trop_load_plugin
                 }
             }
         }
+    }
     }
 
     // (2)--(4) Paths relative to the current working directory
@@ -144,10 +164,11 @@ program define _trop_load_plugin
         di as error ""
         di as error "Locations searched:"
         if "`ado_fullpath'" != "" {
+            di as error "  0. Same dir as ado: `ado_fullpath' -> ./"
             di as error "  1. Relative to ado file: `ado_fullpath' -> ../plugin/"
         }
         else {
-            di as error "  1. (ado file not found in adopath)"
+            di as error "  0-1. (ado file not found in adopath)"
         }
         di as error "  2. `pwd'/trop_stata/plugin/"
         di as error "  3. `pwd'/../plugin/"

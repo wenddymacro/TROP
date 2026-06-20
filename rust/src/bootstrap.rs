@@ -429,6 +429,7 @@ pub fn bootstrap_trop_variance(
     tol: f64,
     seed: u64,
     alpha: f64,
+    x: Option<&ArrayView2<f64>>,
 ) -> (Array1<f64>, f64) {
     // Legacy wrapper: historical callers assumed Bessel-corrected SE
     // (ddof = 1).  The `_full` variant now accepts an explicit ddof; this
@@ -447,6 +448,7 @@ pub fn bootstrap_trop_variance(
         seed,
         alpha,
         1,
+        x,
     );
     (Array1::from_vec(result.estimates), result.se)
 }
@@ -483,13 +485,16 @@ pub fn bootstrap_trop_variance_full(
     seed: u64,
     alpha: f64,
     ddof: u8,
+    x: Option<&ArrayView2<f64>>,
 ) -> BootstrapResult {
     let y_arr = y.to_owned();
     let d_arr = d.to_owned();
     let control_mask_arr = control_mask.to_owned();
     let time_dist_arr = time_dist.to_owned();
+    let x_arr = x.map(|xv| xv.to_owned());
 
     let n_periods = y_arr.nrows();
+    let n_units = y_arr.ncols();
 
     // Map infinite lambda values to effective computation values:
     //   lambda_time/unit = Inf  →  0.0  (uniform kernel weights)
@@ -527,6 +532,23 @@ pub fn bootstrap_trop_variance_full(
             );
 
             let n_boot_units = d_boot.ncols();
+
+            // Resample X matrix by unit if covariates are present.
+            let x_boot = if let Some(ref x_owned) = x_arr {
+                let n_cov = x_owned.ncols();
+                let n_obs_boot = n_periods * n_boot_units;
+                let mut x_b = Array2::<f64>::zeros((n_obs_boot, n_cov));
+                for (j, &orig_unit) in sampled_units.iter().enumerate() {
+                    for t in 0..n_periods {
+                        let src_idx = t * n_units + orig_unit;
+                        let dst_idx = t * n_boot_units + j;
+                        x_b.row_mut(dst_idx).assign(&x_owned.row(src_idx));
+                    }
+                }
+                Some(x_b)
+            } else {
+                None
+            };
 
             // Identify treated (t, i) pairs in the bootstrap sample.
             let mut boot_treated: Vec<(usize, usize)> = Vec::new();
@@ -578,7 +600,8 @@ pub fn bootstrap_trop_variance_full(
                     &time_dist_arr.view(),
                 );
 
-                if let Some((alpha_est, beta, l, _n_iters, _converged)) = estimate_model(
+                let x_boot_view = x_boot.as_ref().map(|xb| xb.view());
+                if let Some((alpha_est, beta, l, _n_iters, _converged, result_gamma)) = estimate_model(
                     &y_boot.view(),
                     &control_mask_boot.view(),
                     &weight_matrix.view(),
@@ -589,8 +612,16 @@ pub fn bootstrap_trop_variance_full(
                     tol,
                     None,
                     None,
+                    x_boot_view.as_ref(),
+                    None,
                 ) {
-                    let tau = y_boot[[t, i]] - alpha_est[i] - beta[t] - l[[t, i]];
+                    let mut tau = y_boot[[t, i]] - alpha_est[i] - beta[t] - l[[t, i]];
+                    if let Some(ref x_b) = x_boot {
+                        if let Some(ref g) = result_gamma {
+                            let idx = t * n_boot_units + i;
+                            tau -= x_b.row(idx).dot(g);
+                        }
+                    }
                     if tau.is_finite() {
                         tau_values.push(tau);
                     }
@@ -655,6 +686,7 @@ pub fn bootstrap_trop_variance_joint(
     tol: f64,
     seed: u64,
     alpha: f64,
+    x: Option<&ArrayView2<f64>>,
 ) -> (Array1<f64>, f64) {
     // Legacy wrapper: historical callers assumed Bessel-corrected SE
     // (ddof = 1).  The `_full` variant now accepts an explicit ddof; this
@@ -671,6 +703,7 @@ pub fn bootstrap_trop_variance_joint(
         seed,
         alpha,
         1,
+        x,
     );
     (Array1::from_vec(result.estimates), result.se)
 }
@@ -704,9 +737,11 @@ pub fn bootstrap_trop_variance_joint_full(
     seed: u64,
     alpha: f64,
     ddof: u8,
+    x: Option<&ArrayView2<f64>>,
 ) -> BootstrapResult {
     let y_arr = y.to_owned();
     let d_arr = d.to_owned();
+    let x_arr = x.map(|xv| xv.to_owned());
 
     let n_units = y_arr.ncols();
     let n_periods = y_arr.nrows();
@@ -752,6 +787,25 @@ pub fn bootstrap_trop_variance_joint_full(
 
             let (y_boot, d_boot) = build_bootstrap_matrices(&y_arr, &d_arr, &sampled_units);
 
+            let n_boot_units = y_boot.ncols();
+
+            // Resample X matrix by unit if covariates are present.
+            let x_boot = if let Some(ref x_owned) = x_arr {
+                let n_cov = x_owned.ncols();
+                let n_obs_boot = n_periods * n_boot_units;
+                let mut x_b = Array2::<f64>::zeros((n_obs_boot, n_cov));
+                for (j, &orig_unit) in sampled_units.iter().enumerate() {
+                    for t in 0..n_periods {
+                        let src_idx = t * n_units + orig_unit;
+                        let dst_idx = t * n_boot_units + j;
+                        x_b.row_mut(dst_idx).assign(&x_owned.row(src_idx));
+                    }
+                }
+                Some(x_b)
+            } else {
+                None
+            };
+
             // Compute joint weights using the original treated-period count.
             let delta = compute_joint_weights(
                 &y_boot.view(),
@@ -770,16 +824,27 @@ pub fn bootstrap_trop_variance_joint_full(
                 &d_boot.view(), &delta.view(),
                 "bootstrap::joint/delta",
             );
+            let x_boot_view = x_boot.as_ref().map(|xb| xb.view());
             let result = if ln_eff >= 1e10 {
-                solve_joint_no_lowrank(&y_boot.view(), &delta.view()).map(
-                    |(mu, alpha_est, beta)| {
+                solve_joint_no_lowrank(
+                    &y_boot.view(),
+                    &delta.view(),
+                    x_boot_view.as_ref(),
+                ).map(
+                    |(mu, alpha_est, beta, result_gamma)| {
                         let mut tau_sum = 0.0_f64;
                         let mut tau_count = 0usize;
-                        let nu_b = y_boot.ncols();
                         for t in 0..n_periods {
-                            for i in 0..nu_b {
+                            for i in 0..n_boot_units {
                                 if d_boot[[t, i]] == 1.0 && y_boot[[t, i]].is_finite() {
-                                    tau_sum += y_boot[[t, i]] - mu - alpha_est[i] - beta[t];
+                                    let mut tau_val = y_boot[[t, i]] - mu - alpha_est[i] - beta[t];
+                                    if let Some(ref x_b) = x_boot {
+                                        if let Some(ref g) = result_gamma {
+                                            let idx = t * n_boot_units + i;
+                                            tau_val -= x_b.row(idx).dot(g);
+                                        }
+                                    }
+                                    tau_sum += tau_val;
                                     tau_count += 1;
                                 }
                             }
@@ -799,8 +864,9 @@ pub fn bootstrap_trop_variance_joint_full(
                     ln_eff,
                     max_iter,
                     tol,
+                    x_boot_view.as_ref(),
                 )
-                .map(|(_, _, _, _, tau, _, _)| tau)
+                .map(|(_, _, _, _, tau, _, _, _)| tau)
             };
 
             result.filter(|tau| tau.is_finite())
@@ -858,14 +924,17 @@ pub fn bootstrap_trop_variance_full_weighted(
     alpha: f64,
     ddof: u8,
     unit_weights: &[f64],
+    x: Option<&ArrayView2<f64>>,
 ) -> BootstrapResult {
     let y_arr = y.to_owned();
     let d_arr = d.to_owned();
     let control_mask_arr = control_mask.to_owned();
     let time_dist_arr = time_dist.to_owned();
     let unit_weights_owned: Vec<f64> = unit_weights.to_vec();
+    let x_arr = x.map(|xv| xv.to_owned());
 
     let n_periods = y_arr.nrows();
+    let n_units = y_arr.ncols();
 
     let lt_eff = if lambda_time.is_infinite() {
         0.0
@@ -899,6 +968,23 @@ pub fn bootstrap_trop_variance_full_weighted(
             );
 
             let n_boot_units = d_boot.ncols();
+
+            // Resample X matrix by unit if covariates are present.
+            let x_boot = if let Some(ref x_owned) = x_arr {
+                let n_cov = x_owned.ncols();
+                let n_obs_boot = n_periods * n_boot_units;
+                let mut x_b = Array2::<f64>::zeros((n_obs_boot, n_cov));
+                for (j, &orig_unit) in sampled_units.iter().enumerate() {
+                    for t in 0..n_periods {
+                        let src_idx = t * n_units + orig_unit;
+                        let dst_idx = t * n_boot_units + j;
+                        x_b.row_mut(dst_idx).assign(&x_owned.row(src_idx));
+                    }
+                }
+                Some(x_b)
+            } else {
+                None
+            };
 
             // Propagate per-unit pweights through the bootstrap resampling:
             // each resampled column `new_idx` inherits the weight of the
@@ -951,7 +1037,8 @@ pub fn bootstrap_trop_variance_full_weighted(
                     &time_dist_arr.view(),
                 );
 
-                if let Some((alpha_est, beta, l, _n_iters, _converged)) = estimate_model(
+                let x_boot_view = x_boot.as_ref().map(|xb| xb.view());
+                if let Some((alpha_est, beta, l, _n_iters, _converged, result_gamma)) = estimate_model(
                     &y_boot.view(),
                     &control_mask_boot.view(),
                     &weight_matrix.view(),
@@ -962,8 +1049,16 @@ pub fn bootstrap_trop_variance_full_weighted(
                     tol,
                     None,
                     None,
+                    x_boot_view.as_ref(),
+                    None,
                 ) {
-                    let tau = y_boot[[t, i]] - alpha_est[i] - beta[t] - l[[t, i]];
+                    let mut tau = y_boot[[t, i]] - alpha_est[i] - beta[t] - l[[t, i]];
+                    if let Some(ref x_b) = x_boot {
+                        if let Some(ref g) = result_gamma {
+                            let idx = t * n_boot_units + i;
+                            tau -= x_b.row(idx).dot(g);
+                        }
+                    }
                     if tau.is_finite() {
                         tau_cells.push((tau, i));
                     }
@@ -1017,10 +1112,12 @@ pub fn bootstrap_trop_variance_joint_full_weighted(
     alpha: f64,
     ddof: u8,
     unit_weights: &[f64],
+    x: Option<&ArrayView2<f64>>,
 ) -> BootstrapResult {
     let y_arr = y.to_owned();
     let d_arr = d.to_owned();
     let unit_weights_owned: Vec<f64> = unit_weights.to_vec();
+    let x_arr = x.map(|xv| xv.to_owned());
 
     let n_units = y_arr.ncols();
     let n_periods = y_arr.nrows();
@@ -1063,6 +1160,23 @@ pub fn bootstrap_trop_variance_joint_full_weighted(
             let (y_boot, d_boot) = build_bootstrap_matrices(&y_arr, &d_arr, &sampled_units);
             let nu_b = y_boot.ncols();
 
+            // Resample X matrix by unit if covariates are present.
+            let x_boot = if let Some(ref x_owned) = x_arr {
+                let n_cov = x_owned.ncols();
+                let n_obs_boot = n_periods * nu_b;
+                let mut x_b = Array2::<f64>::zeros((n_obs_boot, n_cov));
+                for (j, &orig_unit) in sampled_units.iter().enumerate() {
+                    for t in 0..n_periods {
+                        let src_idx = t * n_units + orig_unit;
+                        let dst_idx = t * nu_b + j;
+                        x_b.row_mut(dst_idx).assign(&x_owned.row(src_idx));
+                    }
+                }
+                Some(x_b)
+            } else {
+                None
+            };
+
             let w_boot: Vec<f64> = sampled_units
                 .iter()
                 .map(|&orig_idx| unit_weights_owned.get(orig_idx).copied().unwrap_or(0.0))
@@ -1082,15 +1196,26 @@ pub fn bootstrap_trop_variance_joint_full_weighted(
             );
 
             // Collect (tau, column_index) pairs for weighted aggregation.
+            let x_boot_view = x_boot.as_ref().map(|xb| xb.view());
             let tau_cells_opt: Option<Vec<(f64, usize)>> = if ln_eff >= 1e10 {
-                solve_joint_no_lowrank(&y_boot.view(), &delta.view()).map(
-                    |(mu, alpha_est, beta)| {
+                solve_joint_no_lowrank(
+                    &y_boot.view(),
+                    &delta.view(),
+                    x_boot_view.as_ref(),
+                ).map(
+                    |(mu, alpha_est, beta, result_gamma)| {
                         let mut cells: Vec<(f64, usize)> = Vec::new();
                         for t in 0..n_periods {
                             for i in 0..nu_b {
                                 if d_boot[[t, i]] == 1.0 && y_boot[[t, i]].is_finite() {
-                                    let tau_val =
+                                    let mut tau_val =
                                         y_boot[[t, i]] - mu - alpha_est[i] - beta[t];
+                                    if let Some(ref x_b) = x_boot {
+                                        if let Some(ref g) = result_gamma {
+                                            let idx = t * nu_b + i;
+                                            tau_val -= x_b.row(idx).dot(g);
+                                        }
+                                    }
                                     cells.push((tau_val, i));
                                 }
                             }
@@ -1106,17 +1231,24 @@ pub fn bootstrap_trop_variance_joint_full_weighted(
                     ln_eff,
                     max_iter,
                     tol,
+                    x_boot_view.as_ref(),
                 )
-                .map(|(mu, alpha_est, beta, l, _tau, _iters, _converged)| {
+                .map(|(mu, alpha_est, beta, l, _tau, _iters, _converged, result_gamma)| {
                     let mut cells: Vec<(f64, usize)> = Vec::new();
                     for t in 0..n_periods {
                         for i in 0..nu_b {
                             if d_boot[[t, i]] == 1.0 && y_boot[[t, i]].is_finite() {
-                                let tau_val = y_boot[[t, i]]
+                                let mut tau_val = y_boot[[t, i]]
                                     - mu
                                     - alpha_est[i]
                                     - beta[t]
                                     - l[[t, i]];
+                                if let Some(ref x_b) = x_boot {
+                                    if let Some(ref g) = result_gamma {
+                                        let idx = t * nu_b + i;
+                                        tau_val -= x_b.row(idx).dot(g);
+                                    }
+                                }
                                 cells.push((tau_val, i));
                             }
                         }
@@ -1133,6 +1265,475 @@ pub fn bootstrap_trop_variance_joint_full_weighted(
 
     let n_valid = bootstrap_estimates.len();
 
+    let (mean, _, se) = compute_bootstrap_variance(&bootstrap_estimates, ddof);
+    let (ci_lower, ci_upper) = compute_percentile_ci(&bootstrap_estimates, alpha);
+
+    BootstrapResult {
+        estimates: bootstrap_estimates,
+        se,
+        mean,
+        ci_lower,
+        ci_upper,
+        n_valid,
+        n_total: n_bootstrap,
+        level: 1.0 - alpha,
+    }
+}
+
+// ============================================================================
+// Rao-Wu Bootstrap for Survey Designs
+// ============================================================================
+
+/// Metadata for a single stratum in the Rao-Wu bootstrap scheme.
+#[derive(Debug, Clone)]
+struct StratumInfo {
+    /// Number of distinct PSUs in this stratum.
+    n_psu: usize,
+    /// Per-stratum finite population SIZE N_h (not the sampling fraction f_h).
+    /// The sampling fraction is computed as f_h = n_h / fpc where n_h is the
+    /// number of PSUs observed in this stratum.
+    fpc: Option<f64>,
+    /// Mapping: PSU local index → vector of unit column indices belonging to that PSU.
+    psu_to_units: Vec<Vec<usize>>,
+}
+
+/// Build the stratum structure from unit-level labels.
+///
+/// Groups units by stratum, then within each stratum by PSU.
+/// Returns one [`StratumInfo`] per distinct stratum.
+fn build_strata_structure(
+    strata: &[i64],
+    psu: &[i64],
+    fpc: Option<&[f64]>,
+) -> Vec<StratumInfo> {
+    use std::collections::BTreeMap;
+
+    // stratum_label → { psu_label → [unit_indices] }
+    let mut strata_map: BTreeMap<i64, BTreeMap<i64, Vec<usize>>> = BTreeMap::new();
+    let mut strata_fpc: BTreeMap<i64, Option<f64>> = BTreeMap::new();
+
+    for (unit_idx, (&s, &p)) in strata.iter().zip(psu.iter()).enumerate() {
+        strata_map
+            .entry(s)
+            .or_default()
+            .entry(p)
+            .or_default()
+            .push(unit_idx);
+
+        // Record FPC for this stratum (assumed constant within stratum).
+        if let Some(fpc_vals) = fpc {
+            strata_fpc.entry(s).or_insert(Some(fpc_vals[unit_idx]));
+        } else {
+            strata_fpc.entry(s).or_insert(None);
+        }
+    }
+
+    strata_map
+        .into_iter()
+        .map(|(s_label, psu_map)| {
+            let psu_to_units: Vec<Vec<usize>> =
+                psu_map.into_values().collect();
+            let n_psu = psu_to_units.len();
+            let fpc_val = strata_fpc.get(&s_label).copied().flatten();
+            StratumInfo {
+                n_psu,
+                fpc: fpc_val,
+                psu_to_units,
+            }
+        })
+        .collect()
+}
+
+/// Rao-Wu (1988) bootstrap for twostep method with complex survey design.
+///
+/// Instead of physically resampling units, generates rescaled survey weights
+/// per bootstrap iteration. Since survey weights only affect ATT aggregation
+/// (not model fitting), we fit the model ONCE and reweight B times.
+///
+/// Algorithm:
+/// 1. On the original panel, compute τ_{t,i} for every treated cell once
+///    (one local model fit per treated observation, held fixed across all
+///    bootstrap draws — survey weights do not enter model fitting).
+/// 2. For b=1..B (parallel):
+///    - For each stratum h with n_h PSUs:
+///      m_h = n_h-1 (no FPC) or max(1, round((1-f_h)(n_h-1))) (with FPC)
+///      Draw m_h PSUs with replacement, count r_hi
+///      Scale: w_i*(b) = w_i × (n_h/m_h) × r_hi
+///    - ATT^(b) = Σ w_i*(b) τ_{ti} / Σ w_i*(b) [treated obs only]
+/// 3. SE = std(ATT^(1)..ATT^(B), ddof)
+#[allow(clippy::too_many_arguments)]
+pub fn bootstrap_trop_variance_rao_wu(
+    y: &ArrayView2<f64>,
+    d: &ArrayView2<f64>,
+    control_mask: &ArrayView2<u8>,
+    time_dist: &ArrayView2<i64>,
+    lambda_time: f64,
+    lambda_unit: f64,
+    lambda_nn: f64,
+    n_bootstrap: usize,
+    max_iter: usize,
+    tol: f64,
+    seed: u64,
+    alpha: f64,
+    ddof: u8,
+    strata: &[i64],
+    psu: &[i64],
+    fpc: Option<&[f64]>,
+    unit_weights: &[f64],
+    x: Option<&ArrayView2<f64>>,
+) -> BootstrapResult {
+    let n_periods = y.nrows();
+    let n_units = y.ncols();
+
+    // Map infinite lambda values to effective computation values.
+    let lt_eff = if lambda_time.is_infinite() { 0.0 } else { lambda_time };
+    let lu_eff = if lambda_unit.is_infinite() { 0.0 } else { lambda_unit };
+    let ln_eff = if lambda_nn.is_infinite() { 1e10 } else { lambda_nn };
+
+    // ---- Phase 1: Fit model ONCE, collect per-treated-obs τ values ----
+    let dist_cache = UnitDistanceCache::build(y, d);
+
+    // Identify treated (t, i) pairs.
+    let mut treated_obs: Vec<(usize, usize)> = Vec::new();
+    for t in 0..n_periods {
+        for i in 0..n_units {
+            if d[[t, i]] == 1.0 {
+                treated_obs.push((t, i));
+            }
+        }
+    }
+
+    if treated_obs.is_empty() {
+        return BootstrapResult {
+            estimates: Vec::new(),
+            se: 0.0,
+            mean: 0.0,
+            ci_lower: f64::NAN,
+            ci_upper: f64::NAN,
+            n_valid: 0,
+            n_total: n_bootstrap,
+            level: 1.0 - alpha,
+        };
+    }
+
+    // Compute τ for each treated observation (single model fit).
+    let tau_cells: Vec<(f64, usize)> = treated_obs
+        .par_iter()
+        .filter_map(|&(t, i)| {
+            let weight_matrix = compute_weight_matrix_cached(
+                y,
+                d,
+                &dist_cache,
+                n_periods,
+                n_units,
+                i,
+                t,
+                lt_eff,
+                lu_eff,
+                time_dist,
+            );
+
+            estimate_model(
+                y,
+                control_mask,
+                &weight_matrix.view(),
+                ln_eff,
+                n_periods,
+                n_units,
+                max_iter,
+                tol,
+                None,
+                None,
+                x,
+                None,
+            )
+            .and_then(|(alpha_est, beta, l, _n_iters, _converged, result_gamma)| {
+                let mut tau = y[[t, i]] - alpha_est[i] - beta[t] - l[[t, i]];
+                if let Some(x_mat) = x {
+                    if let Some(ref g) = result_gamma {
+                        let idx = t * n_units + i;
+                        tau -= x_mat.row(idx).dot(g);
+                    }
+                }
+                if tau.is_finite() {
+                    Some((tau, i))
+                } else {
+                    None
+                }
+            })
+        })
+        .collect();
+
+    if tau_cells.is_empty() {
+        return BootstrapResult {
+            estimates: Vec::new(),
+            se: 0.0,
+            mean: 0.0,
+            ci_lower: f64::NAN,
+            ci_upper: f64::NAN,
+            n_valid: 0,
+            n_total: n_bootstrap,
+            level: 1.0 - alpha,
+        };
+    }
+
+    // ---- Phase 2: Rao-Wu reweighting (parallel B iterations) ----
+    let strata_groups = build_strata_structure(strata, psu, fpc);
+    let unit_weights_owned: Vec<f64> = unit_weights.to_vec();
+    let tau_cells_ref = &tau_cells;
+
+    let bootstrap_estimates: Vec<f64> = (0..n_bootstrap)
+        .into_par_iter()
+        .filter_map(|b| {
+            let iteration_seed = seed.wrapping_add(b as u64);
+            let mut rng = Xoshiro256PlusPlus::seed_from_u64(iteration_seed);
+            let mut boot_weights = unit_weights_owned.clone();
+
+            for stratum_info in &strata_groups {
+                let n_h = stratum_info.n_psu;
+                if n_h < 2 {
+                    continue; // lonely PSU: keep original weight
+                }
+
+                let m_h = if let Some(fpc_val) = stratum_info.fpc {
+                    let f_h = n_h as f64 / fpc_val;
+                    if f_h >= 1.0 {
+                        continue; // census stratum
+                    }
+                    (((1.0 - f_h) * (n_h as f64 - 1.0)).round() as usize).max(1)
+                } else {
+                    n_h - 1
+                };
+
+                // Draw m_h PSUs with replacement
+                let mut counts = vec![0usize; n_h];
+                for _ in 0..m_h {
+                    let idx = rng.gen_range(0..n_h);
+                    counts[idx] += 1;
+                }
+
+                // Scale weights for units in this stratum
+                let scale_factor = n_h as f64 / m_h as f64;
+                for (psu_local_idx, &count) in counts.iter().enumerate() {
+                    for &unit_idx in &stratum_info.psu_to_units[psu_local_idx] {
+                        boot_weights[unit_idx] =
+                            unit_weights_owned[unit_idx] * scale_factor * count as f64;
+                    }
+                }
+            }
+
+            // Weighted ATT computation
+            let mut weighted_sum = 0.0_f64;
+            let mut weight_sum = 0.0_f64;
+            for &(tau_val, unit_idx) in tau_cells_ref {
+                let w = boot_weights[unit_idx];
+                if w.is_finite() && w > 0.0 {
+                    weighted_sum += w * tau_val;
+                    weight_sum += w;
+                }
+            }
+
+            if weight_sum > 0.0 {
+                let att = weighted_sum / weight_sum;
+                if att.is_finite() { Some(att) } else { None }
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    let n_valid = bootstrap_estimates.len();
+    let (mean, _, se) = compute_bootstrap_variance(&bootstrap_estimates, ddof);
+    let (ci_lower, ci_upper) = compute_percentile_ci(&bootstrap_estimates, alpha);
+
+    BootstrapResult {
+        estimates: bootstrap_estimates,
+        se,
+        mean,
+        ci_lower,
+        ci_upper,
+        n_valid,
+        n_total: n_bootstrap,
+        level: 1.0 - alpha,
+    }
+}
+
+/// Rao-Wu (1988) bootstrap for joint method with complex survey design.
+///
+/// Same "fit once, reweight B times" strategy as the twostep variant.
+/// The joint estimator produces per-cell τ values from a single global
+/// WLS fit, then the Rao-Wu rescaling generates B weighted ATTs.
+#[allow(clippy::too_many_arguments)]
+pub fn bootstrap_trop_variance_rao_wu_joint(
+    y: &ArrayView2<f64>,
+    d: &ArrayView2<f64>,
+    lambda_time: f64,
+    lambda_unit: f64,
+    lambda_nn: f64,
+    n_bootstrap: usize,
+    max_iter: usize,
+    tol: f64,
+    seed: u64,
+    alpha: f64,
+    ddof: u8,
+    strata: &[i64],
+    psu: &[i64],
+    fpc: Option<&[f64]>,
+    unit_weights: &[f64],
+    x: Option<&ArrayView2<f64>>,
+) -> BootstrapResult {
+    let n_periods = y.nrows();
+    let n_units = y.ncols();
+
+    let lt_eff = if lambda_time.is_infinite() { 0.0 } else { lambda_time };
+    let lu_eff = if lambda_unit.is_infinite() { 0.0 } else { lambda_unit };
+    let ln_eff = if lambda_nn.is_infinite() { 1e10 } else { lambda_nn };
+
+    // Determine treated periods for joint weight construction.
+    let mut first_treat_period = n_periods;
+    for t in 0..n_periods {
+        for i in 0..n_units {
+            if d[[t, i]] == 1.0 {
+                first_treat_period = first_treat_period.min(t);
+                break;
+            }
+        }
+    }
+    let treated_periods = n_periods.saturating_sub(first_treat_period);
+
+    // ---- Phase 1: Fit joint model ONCE ----
+    let delta = compute_joint_weights(y, d, lt_eff, lu_eff, treated_periods);
+
+    debug_assert_delta_is_1minus_d_masked(d, &delta.view(), "bootstrap::rao_wu_joint/delta");
+
+    // Extract per-cell τ values from joint fit.
+    let tau_cells: Vec<(f64, usize)> = if ln_eff >= 1e10 {
+        match solve_joint_no_lowrank(y, &delta.view(), x) {
+            Some((mu, alpha_est, beta, result_gamma)) => {
+                let mut cells = Vec::new();
+                for t in 0..n_periods {
+                    for i in 0..n_units {
+                        if d[[t, i]] == 1.0 && y[[t, i]].is_finite() {
+                            let mut tau_val = y[[t, i]] - mu - alpha_est[i] - beta[t];
+                            if let Some(x_mat) = x {
+                                if let Some(ref g) = result_gamma {
+                                    let idx = t * n_units + i;
+                                    tau_val -= x_mat.row(idx).dot(g);
+                                }
+                            }
+                            if tau_val.is_finite() {
+                                cells.push((tau_val, i));
+                            }
+                        }
+                    }
+                }
+                cells
+            }
+            None => Vec::new(),
+        }
+    } else {
+        match solve_joint_with_lowrank(y, d, &delta.view(), ln_eff, max_iter, tol, x) {
+            Some((mu, alpha_est, beta, l, _tau, _iters, _converged, result_gamma)) => {
+                let mut cells = Vec::new();
+                for t in 0..n_periods {
+                    for i in 0..n_units {
+                        if d[[t, i]] == 1.0 && y[[t, i]].is_finite() {
+                            let mut tau_val =
+                                y[[t, i]] - mu - alpha_est[i] - beta[t] - l[[t, i]];
+                            if let Some(x_mat) = x {
+                                if let Some(ref g) = result_gamma {
+                                    let idx = t * n_units + i;
+                                    tau_val -= x_mat.row(idx).dot(g);
+                                }
+                            }
+                            if tau_val.is_finite() {
+                                cells.push((tau_val, i));
+                            }
+                        }
+                    }
+                }
+                cells
+            }
+            None => Vec::new(),
+        }
+    };
+
+    if tau_cells.is_empty() {
+        return BootstrapResult {
+            estimates: Vec::new(),
+            se: 0.0,
+            mean: 0.0,
+            ci_lower: f64::NAN,
+            ci_upper: f64::NAN,
+            n_valid: 0,
+            n_total: n_bootstrap,
+            level: 1.0 - alpha,
+        };
+    }
+
+    // ---- Phase 2: Rao-Wu reweighting (parallel B iterations) ----
+    let strata_groups = build_strata_structure(strata, psu, fpc);
+    let unit_weights_owned: Vec<f64> = unit_weights.to_vec();
+    let tau_cells_ref = &tau_cells;
+
+    let bootstrap_estimates: Vec<f64> = (0..n_bootstrap)
+        .into_par_iter()
+        .filter_map(|b| {
+            let iteration_seed = seed.wrapping_add(b as u64);
+            let mut rng = Xoshiro256PlusPlus::seed_from_u64(iteration_seed);
+            let mut boot_weights = unit_weights_owned.clone();
+
+            for stratum_info in &strata_groups {
+                let n_h = stratum_info.n_psu;
+                if n_h < 2 {
+                    continue;
+                }
+
+                let m_h = if let Some(fpc_val) = stratum_info.fpc {
+                    let f_h = n_h as f64 / fpc_val;
+                    if f_h >= 1.0 {
+                        continue;
+                    }
+                    (((1.0 - f_h) * (n_h as f64 - 1.0)).round() as usize).max(1)
+                } else {
+                    n_h - 1
+                };
+
+                let mut counts = vec![0usize; n_h];
+                for _ in 0..m_h {
+                    let idx = rng.gen_range(0..n_h);
+                    counts[idx] += 1;
+                }
+
+                let scale_factor = n_h as f64 / m_h as f64;
+                for (psu_local_idx, &count) in counts.iter().enumerate() {
+                    for &unit_idx in &stratum_info.psu_to_units[psu_local_idx] {
+                        boot_weights[unit_idx] =
+                            unit_weights_owned[unit_idx] * scale_factor * count as f64;
+                    }
+                }
+            }
+
+            let mut weighted_sum = 0.0_f64;
+            let mut weight_sum = 0.0_f64;
+            for &(tau_val, unit_idx) in tau_cells_ref {
+                let w = boot_weights[unit_idx];
+                if w.is_finite() && w > 0.0 {
+                    weighted_sum += w * tau_val;
+                    weight_sum += w;
+                }
+            }
+
+            if weight_sum > 0.0 {
+                let att = weighted_sum / weight_sum;
+                if att.is_finite() { Some(att) } else { None }
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    let n_valid = bootstrap_estimates.len();
     let (mean, _, se) = compute_bootstrap_variance(&bootstrap_estimates, ddof);
     let (ci_lower, ci_upper) = compute_percentile_ci(&bootstrap_estimates, alpha);
 
@@ -1924,6 +2525,7 @@ mod tests {
             seed,
             0.05,
             1,
+            None,
         );
 
         let weights = vec![1.0_f64; n_units];
@@ -1942,6 +2544,7 @@ mod tests {
             0.05,
             1,
             &weights,
+            None,
         );
 
         assert_eq!(unweighted.estimates.len(), weighted.estimates.len());

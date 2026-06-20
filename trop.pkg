@@ -1,6 +1,6 @@
 v 3
 d TROP - Triply RObust Panel Estimator
-d Version: 1.1.0
+d Version: 1.2.0
 d Athey, Imbens, Qu & Viviano (2025)
 d Distribution-Date: 20260420
 d License: AGPL-3.0
@@ -59,10 +59,11 @@ f mata/trop_estat_helpers.mata
 f mata/trop_lambda_grid.mata
 f mata/trop_main.mata
 d
-d === Pre-compiled Plugins ===
-d Note: Only macOS ARM64 plugin included in this distribution.
-d Other platforms can be built from source using the Rust toolchain.
-f plugin/trop_macos_arm64.plugin
+d === Pre-compiled Plugins (all platforms) ===
+f ado/trop_macos_arm64.plugin
+f ado/trop_macos_x64.plugin
+f ado/trop_linux_x64.plugin
+f ado/trop_windows_x64.plugin
 d
 d === License ===
 f LICENSE

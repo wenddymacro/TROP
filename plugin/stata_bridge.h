@@ -59,6 +59,8 @@ typedef enum {
     CMD_ESTIMATE_JOINT,
     CMD_BOOTSTRAP_TWOSTEP,
     CMD_BOOTSTRAP_JOINT,
+    CMD_BOOTSTRAP_RAO_WU_TWOSTEP,
+    CMD_BOOTSTRAP_RAO_WU_JOINT,
     CMD_DISTANCE_MATRIX,
     CMD_UNKNOWN
 } TropCommand;
@@ -472,6 +474,76 @@ extern int stata_bootstrap_trop_variance_joint(
 );
 
 /**
+ * Rao-Wu bootstrap variance estimation for the twostep estimator
+ * with complex survey design (strata, PSU, FPC).
+ *
+ * Fits the model once, then rescales unit weights for each replicate
+ * according to the Rao-Wu (1988) scheme.
+ *
+ * @param fpc_ptr    FPC values per unit (nullable; NULL = no FPC)
+ */
+extern int stata_bootstrap_trop_variance_rao_wu(
+    const double *y_ptr,
+    const double *d_ptr,
+    const unsigned char *control_mask_ptr,
+    const int64_t *time_dist_ptr,
+    int n_periods,
+    int n_units,
+    double lambda_time,
+    double lambda_unit,
+    double lambda_nn,
+    int n_bootstrap,
+    int max_iter,
+    double tol,
+    uint64_t seed,
+    double alpha,
+    int ddof,
+    const int64_t *strata_ptr,
+    const int64_t *psu_ptr,
+    const double *fpc_ptr,
+    const double *unit_weights_ptr,
+    double *estimates_ptr,
+    double *se_out,
+    double *ci_lower_out,
+    double *ci_upper_out,
+    int *n_valid_out
+);
+
+/**
+ * Rao-Wu bootstrap variance estimation for the joint estimator
+ * with complex survey design (strata, PSU, FPC).
+ *
+ * Same Rao-Wu reweighting scheme applied to the joint estimator.
+ * Does not require control_mask_ptr or time_dist_ptr.
+ *
+ * @param fpc_ptr    FPC values per unit (nullable; NULL = no FPC)
+ */
+extern int stata_bootstrap_trop_variance_rao_wu_joint(
+    const double *y_ptr,
+    const double *d_ptr,
+    int n_periods,
+    int n_units,
+    double lambda_time,
+    double lambda_unit,
+    double lambda_nn,
+    int n_bootstrap,
+    int max_iter,
+    double tol,
+    uint64_t seed,
+    double alpha,
+    int ddof,
+    const int64_t *strata_ptr,
+    const int64_t *psu_ptr,
+    const double *fpc_ptr,
+    const double *unit_weights_ptr,
+    double *estimates_ptr,
+    double *se_out,
+    double *ci_lower_out,
+    double *ci_upper_out,
+    int *n_valid_out
+);
+
+/**
  * Compute the pairwise unit distance matrix.
  *
  * For each pair of units (i, j), computes the Euclidean distance
@@ -675,6 +747,170 @@ extern int stata_compute_joint_weight_vectors(
     double lambda_unit,
     double *delta_time_out,
     double *delta_unit_out
+);
+
+/* ============================================================================
+ * Covariate-aware variants
+ *
+ * These mirror the base functions above but accept an additional covariate
+ * matrix X (T*N x p, column-major) and, where applicable, a gamma output
+ * buffer (p x 1).
+ * ============================================================================ */
+
+extern int stata_loocv_grid_search_with_covariates(
+    const double *y_ptr,
+    const double *d_ptr,
+    const unsigned char *control_mask_ptr,
+    const int64_t *time_dist_ptr,
+    int n_periods,
+    int n_units,
+    const double *lambda_time_grid_ptr,
+    int lambda_time_grid_len,
+    const double *lambda_unit_grid_ptr,
+    int lambda_unit_grid_len,
+    const double *lambda_nn_grid_ptr,
+    int lambda_nn_grid_len,
+    int max_iter,
+    double tol,
+    double *best_lambda_time_out,
+    double *best_lambda_unit_out,
+    double *best_lambda_nn_out,
+    double *best_score_out,
+    int *n_valid_out,
+    int *n_attempted_out,
+    int *first_failed_t_out,
+    int *first_failed_i_out,
+    double *stage1_lambda_time_out,
+    double *stage1_lambda_unit_out,
+    double *stage1_lambda_nn_out,
+    const double *x_ptr,
+    int n_covariates
+);
+
+extern int stata_loocv_grid_search_exhaustive_with_covariates(
+    const double *y_ptr,
+    const double *d_ptr,
+    const unsigned char *control_mask_ptr,
+    const int64_t *time_dist_ptr,
+    int n_periods,
+    int n_units,
+    const double *lambda_time_grid_ptr,
+    int lambda_time_grid_len,
+    const double *lambda_unit_grid_ptr,
+    int lambda_unit_grid_len,
+    const double *lambda_nn_grid_ptr,
+    int lambda_nn_grid_len,
+    int max_iter,
+    double tol,
+    double *best_lambda_time_out,
+    double *best_lambda_unit_out,
+    double *best_lambda_nn_out,
+    double *best_score_out,
+    int *n_valid_out,
+    int *n_attempted_out,
+    int *first_failed_t_out,
+    int *first_failed_i_out,
+    const double *x_ptr,
+    int n_covariates
+);
+
+extern int stata_estimate_twostep_with_covariates(
+    const double *y_ptr,
+    const double *d_ptr,
+    const unsigned char *control_mask_ptr,
+    const int64_t *time_dist_ptr,
+    int n_periods,
+    int n_units,
+    double lambda_time,
+    double lambda_unit,
+    double lambda_nn,
+    int max_iter,
+    double tol,
+    double *att_out,
+    double *tau_ptr,
+    double *alpha_ptr,
+    double *beta_ptr,
+    double *l_ptr,
+    int *n_treated_out,
+    int *n_iterations_out,
+    int *converged_out,
+    int *converged_by_obs_ptr,
+    int *n_iters_by_obs_ptr,
+    const double *x_ptr,
+    int n_covariates,
+    double *gamma_out
+);
+
+extern int stata_bootstrap_trop_variance_with_covariates(
+    const double *y_ptr,
+    const double *d_ptr,
+    const unsigned char *control_mask_ptr,
+    const int64_t *time_dist_ptr,
+    int n_periods,
+    int n_units,
+    double lambda_time,
+    double lambda_unit,
+    double lambda_nn,
+    int n_bootstrap,
+    int max_iter,
+    double tol,
+    uint64_t seed,
+    double alpha,
+    int ddof,
+    double *estimates_ptr,
+    double *se_out,
+    double *ci_lower_out,
+    double *ci_upper_out,
+    int *n_valid_out,
+    const double *x_ptr,
+    int n_covariates
+);
+
+extern int stata_estimate_joint_with_covariates(
+    const double *y_ptr,
+    const double *d_ptr,
+    int n_periods,
+    int n_units,
+    double lambda_time,
+    double lambda_unit,
+    double lambda_nn,
+    int max_iter,
+    double tol,
+    double *tau_out,
+    double *mu_out,
+    double *alpha_ptr,
+    double *beta_ptr,
+    double *l_ptr,
+    int *n_iterations_out,
+    int *converged_out,
+    double *tau_vec_ptr,
+    int *n_treated_out,
+    const double *x_ptr,
+    int n_covariates,
+    double *gamma_out
+);
+
+extern int stata_bootstrap_trop_variance_joint_with_covariates(
+    const double *y_ptr,
+    const double *d_ptr,
+    int n_periods,
+    int n_units,
+    double lambda_time,
+    double lambda_unit,
+    double lambda_nn,
+    int n_bootstrap,
+    int max_iter,
+    double tol,
+    uint64_t seed,
+    double alpha,
+    int ddof,
+    double *estimates_ptr,
+    double *se_out,
+    double *ci_lower_out,
+    double *ci_upper_out,
+    int *n_valid_out,
+    const double *x_ptr,
+    int n_covariates
 );
 
 #ifdef __cplusplus

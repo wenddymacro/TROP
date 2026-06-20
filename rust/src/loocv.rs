@@ -286,6 +286,7 @@ pub fn loocv_score_for_params(
     max_iter: usize,
     tol: f64,
     best_score_so_far: f64,
+    x: Option<&ArrayView2<f64>>,
 ) -> (f64, usize, Option<(usize, usize)>) {
     let n_periods = y.nrows();
     let n_units = y.ncols();
@@ -336,10 +337,18 @@ pub fn loocv_score_for_params(
             tol,
             Some((t, i)),
             ws,
+            x,
+            None,
         ) {
-            Some((alpha, beta, l, _n_iters, _converged)) => {
-                // Pseudo-treatment effect: τ̂ = Y_{ti} − α_i − β_t − L_{ti}.
-                let tau = y[[t, i]] - alpha[i] - beta[t] - l[[t, i]];
+            Some((alpha, beta, l, _n_iters, _converged, gamma)) => {
+                // Pseudo-treatment effect: τ̂ = Y_{ti} − α_i − β_t − L_{ti} − X'γ.
+                let mut tau = y[[t, i]] - alpha[i] - beta[t] - l[[t, i]];
+                if let Some(x_mat) = x {
+                    if let Some(ref g) = gamma {
+                        let idx = t * n_units + i;
+                        tau -= x_mat.row(idx).dot(g);
+                    }
+                }
                 tau_sq_sum += tau * tau;
                 n_valid += 1;
 
@@ -398,6 +407,7 @@ pub fn loocv_score_for_params_full_diagnostic(
     lambda_nn: f64,
     max_iter: usize,
     tol: f64,
+    x: Option<&ArrayView2<f64>>,
 ) -> (f64, usize, Vec<(usize, usize)>) {
     let n_periods = y.nrows();
     let n_units = y.ncols();
@@ -441,9 +451,17 @@ pub fn loocv_score_for_params_full_diagnostic(
             tol,
             Some((t, i)),
             ws,
+            x,
+            None,
         ) {
-            Some((alpha, beta, l, _n_iters, _converged)) => {
-                let tau = y[[t, i]] - alpha[i] - beta[t] - l[[t, i]];
+            Some((alpha, beta, l, _n_iters, _converged, gamma)) => {
+                let mut tau = y[[t, i]] - alpha[i] - beta[t] - l[[t, i]];
+                if let Some(x_mat) = x {
+                    if let Some(ref g) = gamma {
+                        let idx = t * n_units + i;
+                        tau -= x_mat.row(idx).dot(g);
+                    }
+                }
                 tau_sq_sum += tau * tau;
                 n_valid += 1;
                 warm_alpha = Some(alpha);
@@ -493,6 +511,7 @@ pub fn univariate_loocv_search(
     param_type: usize,
     max_iter: usize,
     tol: f64,
+    x: Option<&ArrayView2<f64>>,
 ) -> (f64, f64) {
     let mut best_score = f64::INFINITY;
     let mut best_value = grid.first().copied().unwrap_or(0.0);
@@ -550,6 +569,7 @@ pub fn univariate_loocv_search(
                 max_iter,
                 tol,
                 best_score,
+                x,
             );
             (value, lambda_time, lambda_unit, lambda_nn, score)
         })
@@ -597,6 +617,7 @@ pub fn cycling_parameter_search(
     max_iter: usize,
     tol: f64,
     max_cycles: usize,
+    x: Option<&ArrayView2<f64>>,
 ) -> (f64, f64, f64) {
     let mut lambda_time = initial_time;
     let mut lambda_unit = initial_unit;
@@ -619,6 +640,7 @@ pub fn cycling_parameter_search(
             1,
             max_iter,
             tol,
+            x,
         );
         lambda_unit = new_unit;
 
@@ -637,6 +659,7 @@ pub fn cycling_parameter_search(
             0,
             max_iter,
             tol,
+            x,
         );
         lambda_time = new_time;
 
@@ -655,6 +678,7 @@ pub fn cycling_parameter_search(
             2,
             max_iter,
             tol,
+            x,
         );
         lambda_nn = new_nn;
 
@@ -694,6 +718,7 @@ pub fn loocv_grid_search(
     lambda_nn_grid: &[f64],
     max_iter: usize,
     tol: f64,
+    x: Option<&ArrayView2<f64>>,
 ) -> LoocvGridSearchResult {
     let (result, _, _, _) = loocv_grid_search_with_stage1(
         y,
@@ -705,6 +730,7 @@ pub fn loocv_grid_search(
         lambda_nn_grid,
         max_iter,
         tol,
+        x,
     );
     result
 }
@@ -734,6 +760,7 @@ pub fn loocv_grid_search_with_stage1(
     lambda_nn_grid: &[f64],
     max_iter: usize,
     tol: f64,
+    x: Option<&ArrayView2<f64>>,
 ) -> LoocvGridSearchResultWithStage1 {
     // Per paper Eq. 5: Q(λ) sums over every D=0 cell.
     let control_obs = get_control_observations(y, control_mask);
@@ -759,6 +786,7 @@ pub fn loocv_grid_search_with_stage1(
         0,
         max_iter,
         tol,
+        x,
     );
 
     // λ_nn search: fix λ_time = 0, λ_unit = 0 (uniform weights).
@@ -787,6 +815,7 @@ pub fn loocv_grid_search_with_stage1(
         2,
         max_iter,
         tol,
+        x,
     );
 
     // λ_unit search: fix λ_nn = ∞, λ_time = 0.
@@ -804,6 +833,7 @@ pub fn loocv_grid_search_with_stage1(
         1,
         max_iter,
         tol,
+        x,
     );
 
     // Stage 2: Coordinate descent refinement.
@@ -823,6 +853,7 @@ pub fn loocv_grid_search_with_stage1(
         max_iter,
         tol,
         10,
+        x,
     );
 
     // Final evaluation at the selected parameters.
@@ -846,6 +877,7 @@ pub fn loocv_grid_search_with_stage1(
         best_nn,
         max_iter,
         tol,
+        x,
     );
 
     // Preserve the historical "first failed observation" contract.
@@ -891,6 +923,7 @@ pub fn loocv_grid_search_exhaustive(
     lambda_nn_grid: &[f64],
     max_iter: usize,
     tol: f64,
+    x: Option<&ArrayView2<f64>>,
 ) -> LoocvGridSearchResult {
     // Per paper Eq. 5: Q(λ) sums over every D=0 cell.
     let control_obs = get_control_observations(y, control_mask);
@@ -944,6 +977,7 @@ pub fn loocv_grid_search_exhaustive(
                 max_iter,
                 tol,
                 f64::INFINITY,
+                x,
             );
             (lt, lu, ln, score, n_valid, first_failed)
         })
@@ -986,6 +1020,7 @@ pub fn loocv_grid_search_exhaustive(
         ln_eff,
         max_iter,
         tol,
+        x,
     );
     let first_failed = failed_obs.first().copied();
 
@@ -1027,6 +1062,7 @@ pub fn loocv_score_joint(
     max_iter: usize,
     tol: f64,
     best_score_so_far: f64,
+    x: Option<&ArrayView2<f64>>,
 ) -> (f64, usize, Option<(usize, usize)>) {
     let n_periods = y.nrows();
     let n_units = y.ncols();
@@ -1052,23 +1088,29 @@ pub fn loocv_score_joint(
             d, &delta_ex.view(), "loocv_score_joint/delta_ex",
         );
         let result = if lambda_nn >= 1e10 {
-            solve_joint_no_lowrank(y, &delta_ex.view()).map(|(mu, alpha, beta)| {
+            solve_joint_no_lowrank(y, &delta_ex.view(), x).map(|(mu, alpha, beta, gamma)| {
                 let l = Array2::<f64>::zeros((n_periods, n_units));
-                (mu, alpha, beta, l, 0.0_f64, 1_usize, true)
+                (mu, alpha, beta, l, 0.0_f64, 1_usize, true, gamma)
             })
         } else {
-            solve_joint_with_lowrank(y, d, &delta_ex.view(), lambda_nn, max_iter, tol)
+            solve_joint_with_lowrank(y, d, &delta_ex.view(), lambda_nn, max_iter, tol, x)
         };
 
         match result {
-            Some((mu, alpha, beta, l, _tau, _n_iters, _converged)) => {
-                // Pseudo-treatment effect: τ̂ = Y − μ − α − β − L.
+            Some((mu, alpha, beta, l, _tau, _n_iters, _converged, gamma)) => {
+                // Pseudo-treatment effect: τ̂ = Y − μ − α − β − L − X'γ.
                 let y_ti = if y[[t_ex, i_ex]].is_finite() {
                     y[[t_ex, i_ex]]
                 } else {
                     continue;
                 };
-                let tau_loocv = y_ti - mu - alpha[i_ex] - beta[t_ex] - l[[t_ex, i_ex]];
+                let mut tau_loocv = y_ti - mu - alpha[i_ex] - beta[t_ex] - l[[t_ex, i_ex]];
+                if let Some(x_mat) = x {
+                    if let Some(ref g) = gamma {
+                        let idx = t_ex * n_units + i_ex;
+                        tau_loocv -= x_mat.row(idx).dot(g);
+                    }
+                }
                 tau_sq_sum += tau_loocv * tau_loocv;
                 n_valid += 1;
 
@@ -1121,6 +1163,7 @@ pub fn loocv_score_joint_full_diagnostic(
     treated_periods: usize,
     max_iter: usize,
     tol: f64,
+    x: Option<&ArrayView2<f64>>,
 ) -> (f64, usize, Vec<(usize, usize)>) {
     let n_periods = y.nrows();
     let n_units = y.ncols();
@@ -1145,24 +1188,30 @@ pub fn loocv_score_joint_full_diagnostic(
         );
 
         let result = if lambda_nn >= 1e10 {
-            solve_joint_no_lowrank(y, &delta_ex.view()).map(|(mu, alpha, beta)| {
+            solve_joint_no_lowrank(y, &delta_ex.view(), x).map(|(mu, alpha, beta, gamma)| {
                 let l = Array2::<f64>::zeros((n_periods, n_units));
-                (mu, alpha, beta, l, 0.0_f64, 1_usize, true)
+                (mu, alpha, beta, l, 0.0_f64, 1_usize, true, gamma)
             })
         } else {
-            solve_joint_with_lowrank(y, d, &delta_ex.view(), lambda_nn, max_iter, tol)
+            solve_joint_with_lowrank(y, d, &delta_ex.view(), lambda_nn, max_iter, tol, x)
         };
 
         match result {
-            Some((mu, alpha, beta, l, _tau, _n_iters, _converged)) => {
-                // Pseudo-treatment effect: τ̂ = Y − μ − α − β − L.  Skip cells
+            Some((mu, alpha, beta, l, _tau, _n_iters, _converged, gamma)) => {
+                // Pseudo-treatment effect: τ̂ = Y − μ − α − β − L − X'γ.  Skip cells
                 // whose outcome is non-finite (these cannot enter Q(λ)).
                 let y_ti = if y[[t_ex, i_ex]].is_finite() {
                     y[[t_ex, i_ex]]
                 } else {
                     continue;
                 };
-                let tau_loocv = y_ti - mu - alpha[i_ex] - beta[t_ex] - l[[t_ex, i_ex]];
+                let mut tau_loocv = y_ti - mu - alpha[i_ex] - beta[t_ex] - l[[t_ex, i_ex]];
+                if let Some(x_mat) = x {
+                    if let Some(ref g) = gamma {
+                        let idx = t_ex * n_units + i_ex;
+                        tau_loocv -= x_mat.row(idx).dot(g);
+                    }
+                }
                 tau_sq_sum += tau_loocv * tau_loocv;
                 n_valid += 1;
             }
@@ -1201,6 +1250,7 @@ pub fn loocv_grid_search_joint(
     lambda_nn_grid: &[f64],
     max_iter: usize,
     tol: f64,
+    x: Option<&ArrayView2<f64>>,
 ) -> LoocvGridSearchResult {
     // Determine the number of treated periods from D.
     //
@@ -1244,6 +1294,7 @@ pub fn loocv_grid_search_joint(
                 max_iter,
                 tol,
                 f64::INFINITY,
+                x,
             );
 
             (lt, lu, ln, score, n_valid, first_failed)
@@ -1296,6 +1347,7 @@ pub fn loocv_grid_search_joint(
         treated_periods,
         max_iter,
         tol,
+        x,
     );
     let first_failed = failed_obs.first().copied();
 
@@ -1334,6 +1386,7 @@ pub fn loocv_cycling_search_joint(
     max_iter: usize,
     tol: f64,
     max_cycles: usize,
+    x: Option<&ArrayView2<f64>>,
 ) -> LoocvGridSearchResult {
     let (result, _, _, _) = loocv_cycling_search_joint_with_stage1(
         y,
@@ -1345,6 +1398,7 @@ pub fn loocv_cycling_search_joint(
         max_iter,
         tol,
         max_cycles,
+        x,
     );
     result
 }
@@ -1369,6 +1423,7 @@ pub fn loocv_cycling_search_joint_with_stage1(
     max_iter: usize,
     tol: f64,
     max_cycles: usize,
+    x: Option<&ArrayView2<f64>>,
 ) -> LoocvGridSearchResultWithStage1 {
     // Determine treated periods from D matrix.  See `loocv_grid_search_joint`
     // for the simultaneous-adoption precondition.
@@ -1422,6 +1477,7 @@ pub fn loocv_cycling_search_joint_with_stage1(
                         max_iter,
                         tol,
                         best_score_hint,
+                        x,
                     );
                     (val, lt, lu, ln, score, n_valid, first_failed)
                 })
@@ -1537,6 +1593,7 @@ pub fn loocv_cycling_search_joint_with_stage1(
         treated_periods,
         max_iter,
         tol,
+        x,
     );
     let final_first_failed = failed_obs.first().copied();
 
@@ -1715,6 +1772,7 @@ mod tests {
             100,
             1e-6,
             f64::INFINITY,
+            None,
         );
 
         // Score should be finite and non-negative
@@ -1769,6 +1827,7 @@ mod tests {
             100,
             1e-6,
             f64::INFINITY,
+            None,
         );
 
         let (score_full, n_valid_full, failed_full) = loocv_score_joint_full_diagnostic(
@@ -1781,6 +1840,7 @@ mod tests {
             1,
             100,
             1e-6,
+            None,
         );
 
         // When no control fits fail, both paths must agree bit-for-bit on the
@@ -1834,6 +1894,7 @@ mod tests {
             lambda_nn_grid,
             100,
             1e-6,
+            None,
         );
 
         // Best parameters should be from the grid
@@ -1888,6 +1949,7 @@ mod tests {
             lambda_nn_grid,
             100,
             1e-6,
+            None,
         );
 
         let result2 = loocv_grid_search_joint(
@@ -1899,6 +1961,7 @@ mod tests {
             lambda_nn_grid,
             100,
             1e-6,
+            None,
         );
 
         assert_eq!(result1.0, result2.0, "λ_time should match");
@@ -1929,6 +1992,7 @@ mod tests {
             lambda_nn_grid,
             100,
             1e-6,
+            None,
         );
 
         // Score should still be finite (infinity was converted internally)
@@ -2020,6 +2084,7 @@ mod tests {
             100,
             1e-6,
             f64::INFINITY,
+            None,
         );
 
         // Score should be finite (model should fit)
@@ -2072,6 +2137,7 @@ mod tests {
             lambda_nn_grid,
             100,
             1e-6,
+            None,
         );
 
         // Verify diagnostic constraints
@@ -2128,6 +2194,7 @@ mod tests {
             lambda_nn_grid,
             100,
             1e-6,
+            None,
         );
 
         assert_eq!(n_attempted, 19, "Must enumerate all D=0 cells");
@@ -2186,6 +2253,7 @@ mod tests {
             100,
             1e-6,
             f64::INFINITY,
+            None,
         );
 
         let (score2, n_valid2, _) = loocv_score_for_params(
@@ -2201,6 +2269,7 @@ mod tests {
             100,
             1e-6,
             f64::INFINITY,
+            None,
         );
 
         // Scores should be identical (deterministic computation)
@@ -2251,6 +2320,7 @@ mod tests {
                 100,
                 1e-6,
                 f64::INFINITY,
+                None,
             );
 
             if first_failed.is_none() {
@@ -2306,6 +2376,7 @@ mod tests {
             &control_obs,
             0.5, 0.5, 0.1, 100, 1e-6,
             f64::INFINITY,
+            None,
         );
         let (score_full, n_valid_full, failed_full) = loocv_score_for_params_full_diagnostic(
             &y.view(),
@@ -2315,6 +2386,7 @@ mod tests {
             &dist_cache,
             &control_obs,
             0.5, 0.5, 0.1, 100, 1e-6,
+            None,
         );
 
         assert!(first_failed_short.is_none(), "expected zero failures at healthy λ");
@@ -2355,6 +2427,7 @@ mod tests {
             &lambda_nn_grid,
             100,
             1e-6,
+            None,
         );
 
         assert!(
@@ -2481,6 +2554,7 @@ mod tests {
             &lambda_nn_grid,
             100,
             1e-6,
+            None,
         );
         let exhaustive = loocv_grid_search_exhaustive(
             &y.view(),
@@ -2492,6 +2566,7 @@ mod tests {
             &lambda_nn_grid,
             100,
             1e-6,
+            None,
         );
 
         // Exhaustive is guaranteed to find the global grid minimum; cycling
@@ -2555,6 +2630,7 @@ mod tests {
             &lambda_nn_grid,
             100,
             1e-6,
+            None,
         );
         let r2 = loocv_grid_search_exhaustive(
             &y.view(),
@@ -2566,6 +2642,7 @@ mod tests {
             &lambda_nn_grid,
             100,
             1e-6,
+            None,
         );
 
         assert_eq!(r1.0, r2.0, "λ_time must match");
@@ -2616,6 +2693,7 @@ mod tests {
             100,
             1e-6,
             f64::INFINITY,
+            None,
         );
 
         let (score2, _, _) = loocv_score_joint(
@@ -2629,6 +2707,7 @@ mod tests {
             100,
             1e-6,
             f64::INFINITY,
+            None,
         );
 
         let diff = (score1 - score2).abs();

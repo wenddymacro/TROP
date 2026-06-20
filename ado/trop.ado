@@ -2,13 +2,29 @@
 
 /*
     trop -- Estimate average treatment effects on the treated (ATT) in panel
-    data using the TROP framework: unit weights, time weights, and a
-    nuclear-norm-penalized low-rank regression adjustment.
+    data using the TROP framework of Athey, Imbens, Qu, and Viviano (2025):
+    unit weights, time weights, and a nuclear-norm-penalised low-rank
+    regression adjustment.
 
-    Hyperparameters (lambda_time, lambda_unit, lambda_nn) are selected via
-    leave-one-out cross-validation (LOOCV) unless fixedlambda() is specified.
-    Inference is obtained through a cluster bootstrap that resamples units
-    within the treated and control groups separately.
+    Paper anchors
+    -------------
+    The estimator implemented here is paper Algorithm 1 (single treated
+    unit, Eq. 2) extended to multiple treated cells via Algorithm 2
+    (Eq. 13) under method(twostep), and to the homogeneous-tau aggregation
+    of Remark 6.1 under method(joint).  Weight kernels follow Eq. 3.
+    Hyperparameters (lambda_time, lambda_unit, lambda_nn) are selected by
+    leave-one-out cross-validation Q(lambda) (Eq. 5) unless
+    fixedlambda() is specified; the two-stage cycling search follows
+    paper Footnote 2.  Inference uses paper Algorithm 3 (stratified unit
+    bootstrap).  The triple-robustness bias bound (Theorem 5.1) is
+    available as a post-estimation diagnostic via `estat triplerob`.
+
+    Note on method(joint).  Paper Remark 6.1 defines the homogeneous-tau
+    aggregation but does not prescribe a specific time/unit kernel under
+    the shared-weight setting; trop adopts the post-block midpoint
+    delta_time and the pre-period trajectory RMSE delta_unit as
+    engineering choices.  See `help trop` Methods and formulas for the
+    explicit definitions.
 
     Syntax
     ------
@@ -33,7 +49,7 @@ program define trop, eclass
     // requires exactly two variables.  This allows users to verify the
     // installed version without supplying a varlist.
     if `"`0'"' == ", version" | `"`0'"' == ",version" | `"`0'"' == "version" {
-        di as txt "trop version 1.1.0"
+        di as txt "trop version 1.2.0"
         di as txt "Triply Robust Panel Estimator"
         di as txt "Athey, Imbens, Qu & Viviano (2025)"
         di as txt ""
@@ -60,12 +76,17 @@ program define trop, eclass
         LAMbda_nn_grid(numlist missingokay)         /// user-supplied lambda_nn grid (`.` = inf)
         FIXEDlambda(numlist missingokay min=3 max=3) /// fixed (l_time l_unit l_nn); `.` = inf for l_nn
         TOL(real 1e-6)                      /// convergence tolerance for iterative estimation
-        MAXiter(integer 100)                /// maximum iterations for iterative estimation
+        MAXiter(integer 500)                /// maximum iterations for iterative estimation
         BOOTstrap(integer 200)              /// number of bootstrap replications (paper Alg 3 default; 0 = skip)
         BSalpha(real -1)                    /// deprecated; retained for backward compatibility
         SEED(integer 42)                    /// RNG seed for bootstrap
         BSVARiance(string)                  /// bootstrap SE denominator: "sample" (1/(B-1), default) or "paper" (1/B, Alg 3)
         CImethod(string)                    /// primary CI: "percentile" (Alg 3 default when bootstrap>0), "t", or "normal"
+        STRata(varname)                     /// survey: stratification variable
+        PSU(varname)                        /// survey: primary sampling unit variable
+        FPC(varname)                        /// survey: finite population correction variable
+        NEST                                /// survey: nest PSU within strata
+        COVariates(varlist)                 /// covariates for Eq.14 adjustment (Section 6.2)
         VERbose                             /// display progress and diagnostic messages
         Level(cilevel)                      /// confidence level for bootstrap CI
         ]
@@ -301,6 +322,22 @@ program define trop, eclass
         di as txt "  All parameters valid"
     }
 
+    // --- Covariate validation ------------------------------------------------
+    local _n_covariates = 0
+    if "`covariates'" != "" {
+        foreach var of local covariates {
+            capture confirm numeric variable `var'
+            if _rc {
+                di as error "covariate '`var'' must be a numeric variable"
+                exit 111
+            }
+        }
+        local _n_covariates : word count `covariates'
+        if "`verbose'" != "" {
+            di as txt "  Covariates (`_n_covariates'): `covariates'"
+        }
+    }
+
     // --- Mata function loading --------------------------------------------
     // Mata routines must be available before data validation, which calls
     // into Mata for panel structure checks.
@@ -399,6 +436,73 @@ program define trop, eclass
     qui egen `panel_idx' = group(`panelvar') if `touse'
     qui egen `time_idx' = group(`timevar') if `touse'
     sort `panel_idx' `time_idx'
+
+    // --- Survey design options (Rao-Wu bootstrap) -------------------------
+    // When strata/psu/fpc is specified, mark survey design active and pass
+    // variable names to the Mata layer via globals.  The Mata function
+    // trop_prepare_survey_design() will collapse obs-level values to
+    // unit-level, encode them as integers, and store matrices.
+    local _has_survey_design = 0
+    local _survey_nest = 0
+    if "`strata'" != "" | "`psu'" != "" | "`fpc'" != "" {
+        local _has_survey_design = 1
+        // Validate: strata is required when psu or fpc is specified
+        if "`strata'" == "" {
+            di as error "strata() is required when psu() or fpc() is specified."
+            exit 198
+        }
+        // Validate: psu is required when strata is specified
+        if "`psu'" == "" {
+            di as error "psu() is required when strata() is specified."
+            exit 198
+        }
+        // Validate that survey variables exist and are numeric
+        capture confirm numeric variable `strata'
+        if _rc {
+            di as error "strata() variable '`strata'' not found or not numeric."
+            exit 111
+        }
+        capture confirm numeric variable `psu'
+        if _rc {
+            di as error "psu() variable '`psu'' not found or not numeric."
+            exit 111
+        }
+        if "`fpc'" != "" {
+            capture confirm numeric variable `fpc'
+            if _rc {
+                di as error "fpc() variable '`fpc'' not found or not numeric."
+                exit 111
+            }
+        }
+        // nest option
+        if "`nest'" != "" {
+            local _survey_nest = 1
+        }
+        // Store survey metadata in globals for the Mata layer
+        mata: st_global("__trop_strata_var", "`strata'")
+        mata: st_global("__trop_psu_var", "`psu'")
+        mata: st_global("__trop_fpc_var", "`fpc'")
+        scalar __trop_has_survey_design = 1
+        scalar __trop_survey_nest = `_survey_nest'
+        if "`verbose'" != "" {
+            di as txt _n "Survey design detected (Rao-Wu bootstrap):"
+            di as txt "  Strata: `strata'"
+            di as txt "  PSU: `psu'"
+            if "`fpc'" != "" {
+                di as txt "  FPC: `fpc'"
+            }
+            if `_survey_nest' {
+                di as txt "  Nest: PSU nested within strata"
+            }
+        }
+    }
+    else {
+        scalar __trop_has_survey_design = 0
+        scalar __trop_survey_nest = 0
+        mata: st_global("__trop_strata_var", "")
+        mata: st_global("__trop_psu_var", "")
+        mata: st_global("__trop_fpc_var", "")
+    }
 
     // --- Transfer lambda grids to Stata matrices -------------------------
     // The plugin reads grids from named matrices __trop_lambda_*_grid.
@@ -598,6 +702,21 @@ program define trop, eclass
     }
     mata: st_global("__trop_cimethod", "`_cimethod'")
 
+    // --- Prepare covariates for plugin ----------------------------------------
+    if `_n_covariates' > 0 {
+        mata: st_local("_cov_rc", strofreal(trop_prepare_covariates( ///
+            tokens("`covariates'"), "`panel_idx'", "`time_idx'", ///
+            "`touse'", `N', `T_val')))
+        if `_cov_rc' != 0 {
+            di as error "Failed to prepare covariate matrix"
+            exit 459
+        }
+    }
+    else {
+        // Ensure no stale covariates from prior run
+        mata: st_numscalar("__trop_n_covariates", 0)
+    }
+
     // Dispatch to the compiled plugin through the Mata interface layer.
     // trop_main() returns 0 on success or a Stata return code on failure.
     // An empty `weight_var' is treated as "no pweight" by the Mata entry
@@ -708,6 +827,16 @@ program define trop, eclass
     capture ereturn matrix lambda_unit_grid = __trop_lambda_unit_grid
     capture ereturn matrix lambda_nn_grid = __trop_lambda_nn_grid
 
+    // --- Save gamma before cleanup ----------------------------------------
+    // __trop_gamma is produced by the plugin and will be destroyed by
+    // trop_cleanup_temp_vars().  Preserve it in a tempname matrix so that
+    // the ereturn section further below can store e(gamma).
+    tempname _gamma_saved
+    capture confirm matrix __trop_gamma
+    if !_rc {
+        matrix `_gamma_saved' = __trop_gamma
+    }
+
     // --- Drop plugin temporaries ------------------------------------------
     // All code that reads __trop_* scalars or matrices must appear above.
     capture scalar drop __trop_att __trop_se
@@ -738,6 +867,28 @@ program define trop, eclass
     // the core estimation unharmed.
     capture _trop_attach_idnames `panelvar' `timevar'
 
+    // Covariate metadata
+    if `_n_covariates' > 0 {
+        ereturn local covariates "`covariates'"
+        ereturn scalar n_covariates = `_n_covariates'
+        // Store gamma coefficients from the pre-cleanup saved copy
+        capture confirm matrix `_gamma_saved'
+        if !_rc {
+            tempname _gamma_mat
+            matrix `_gamma_mat' = `_gamma_saved'
+            // Name columns with covariate names
+            local _cov_names ""
+            foreach var of local covariates {
+                local _cov_names "`_cov_names' `var'"
+            }
+            matrix colnames `_gamma_mat' = `_cov_names'
+            ereturn matrix gamma = `_gamma_mat'
+        }
+    }
+    else {
+        ereturn scalar n_covariates = 0
+    }
+
     // Survey-design metadata.  Populated only when [pweight] was supplied;
     // downstream post-estimation commands (e.g. `trop_bootstrap`) branch
     // on a non-empty e(weight_var) to enable the weighted Rust path.
@@ -745,6 +896,22 @@ program define trop, eclass
         ereturn local wtype "pweight"
         ereturn local wexp "= `weight_var'"
         ereturn local weight_var "`weight_var'"
+    }
+
+    // Survey design metadata
+    if `_has_survey_design' {
+        ereturn local strata_var "`strata'"
+        ereturn local psu_var "`psu'"
+        if "`fpc'" != "" {
+            ereturn local fpc_var "`fpc'"
+        }
+        ereturn scalar has_survey_design = 1
+        ereturn scalar survey_nest = `_survey_nest'
+        ereturn local bootstrap_type "rao_wu"
+    }
+    else {
+        ereturn scalar has_survey_design = 0
+        ereturn local bootstrap_type "standard"
     }
 
     ereturn scalar N_units = `N'
@@ -1002,6 +1169,17 @@ program define trop, eclass
     if "`method'" == "joint" & !missing(e(mu)) {
         di as txt _n "Global intercept:"
         di as txt "  mu     = " as res %12.6f e(mu)
+    }
+
+    // Covariate coefficients
+    if `_n_covariates' > 0 {
+        di as txt _n "Covariate coefficients (Eq.14 gamma):"
+        local _j = 1
+        foreach var of local covariates {
+            local _gamma_j = e(gamma)[1, `_j']
+            di as txt "  `var'" _col(20) "= " as res %12.6f `_gamma_j'
+            local ++_j
+        }
     }
 
     // Convergence diagnostics

@@ -6,7 +6,7 @@ program define _trop_validate_params
              Method(string) Grid_style(string) ///
              [LAMbda_time_grid(string) LAMbda_unit_grid(string) ///
               LAMbda_nn_grid(string) BOOTstrap(integer 0) ///
-              BSalpha(real 0.05) TOL(real 1e-6) MAXiter(integer 100) ///
+              BSalpha(real 0.05) TOL(real 1e-6) MAXiter(integer 500) ///
               SEED(integer -1) ///
               TOUSE(varname)]
 
@@ -127,7 +127,7 @@ program define _trop_validate_params
 
     if `maxiter' <= 0 {
         di as error "maxiter() must be positive"
-        di as error "  Default: 100"
+        di as error "  Default: 500"
         exit 198
     }
 

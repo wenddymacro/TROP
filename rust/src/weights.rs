@@ -177,8 +177,8 @@ pub fn compute_joint_weights(
 /// of different weight magnitudes.  The unnormalized convention is the
 /// one paper Eq. (3) states explicitly.
 ///
-/// Units treated at the target period receive ω_j = 0 — equivalent to the
-/// (1 − W_{j, target_period}) factor in Eq. (3) for the target period row.
+/// All units j ≠ target_unit receive distance-based weights.
+/// Treated-cell exclusion is handled by the control_mask in estimate_model.
 /// The target unit i always gets ω_i = 1, because `dist_{−t}(i, i) = 0` by
 /// the Eq. (3) definition, so `ω_i = exp(−λ_unit · 0) = 1` for every
 /// λ_unit.  Hard-coding this value avoids a redundant `compute_unit_distance_for_obs`
@@ -208,20 +208,21 @@ pub fn compute_twostep_weight_vectors(
     });
 
     // ω_j = exp(−λ_unit · dist_{−t}(j, i)), unnormalized.
-    // Units treated at the target period get ω_j = 0 (per paper Eq. 3 the
-    // (1 − W) mask discards them). Target unit always receives ω_i = 1.
+    // All units j ≠ target_unit get distance-based weights.
+    // Treated-cell exclusion is handled by the control_mask in estimate_model.
     let mut unit_weights = Array1::<f64>::zeros(n_units);
 
     if lambda_unit == 0.0 {
-        // Uniform kernel: all units untreated at the target period get ω_j = 1.
+        // Uniform kernel: all units j ≠ target_unit get ω_j = 1.
+        // Treated-cell exclusion is handled by the control_mask in estimate_model.
         for j in 0..n_units {
-            if d[[target_period, j]] == 0.0 && j != target_unit {
+            if j != target_unit {
                 unit_weights[j] = 1.0;
             }
         }
     } else {
         for j in 0..n_units {
-            if d[[target_period, j]] == 0.0 && j != target_unit {
+            if j != target_unit {
                 let dist = compute_unit_distance_for_obs(y, d, j, target_unit, target_period);
                 if dist.is_finite() {
                     unit_weights[j] = (-lambda_unit * dist).exp();
@@ -243,7 +244,7 @@ pub fn compute_twostep_weight_vectors(
 #[allow(clippy::too_many_arguments)]
 pub fn compute_twostep_weight_vectors_cached(
     y: &ArrayView2<f64>,
-    d: &ArrayView2<f64>,
+    _d: &ArrayView2<f64>,
     cache: &UnitDistanceCache,
     n_periods: usize,
     n_units: usize,
@@ -263,13 +264,13 @@ pub fn compute_twostep_weight_vectors_cached(
 
     if lambda_unit == 0.0 {
         for j in 0..n_units {
-            if d[[target_period, j]] == 0.0 && j != target_unit {
+            if j != target_unit {
                 unit_weights[j] = 1.0;
             }
         }
     } else {
         for j in 0..n_units {
-            if d[[target_period, j]] == 0.0 && j != target_unit {
+            if j != target_unit {
                 let dist = cache.distance(y, j, target_unit, target_period);
                 if dist.is_finite() {
                     unit_weights[j] = (-lambda_unit * dist).exp();
@@ -293,18 +294,17 @@ pub fn compute_twostep_weight_vectors_cached(
 ///
 ///   δ_time[s] = exp(−λ_time · |s − center|)
 ///     with center = T − T_post / 2 (midpoint of the treated block).
-///     This is the convention used by the Python reference
-///     (`diff_diff.trop_global._compute_global_weights`) and is
-///     preserved here verbatim to keep numerical parity.  Paper
-///     Eq. (3) defines θ_s(λ) = exp(−λ · |s − t|) per *target*
-///     treated period t in Algorithm 1, and Remark 6.1 is silent
-///     on the concrete aggregation kernel under the shared-weight
-///     (joint) setting — we adopt the Python midpoint convention.
-///     In particular, **T_post = 1 is *not* special-cased** to
-///     `center = T − 1`: that would pin the kernel exactly to the
+///     Paper Eq. (3) defines θ_s(λ) = exp(−λ · |s − t|) per *target*
+///     treated period t in Algorithm 1; Remark 6.1 is silent on the
+///     concrete aggregation kernel under the shared-weight (joint)
+///     setting, so the post-block midpoint is adopted here as an
+///     engineering choice and pinned by the released numerical
+///     baseline.  In particular, **T_post = 1 is *not* special-cased**
+///     to `center = T − 1`: that would pin the kernel exactly to the
 ///     single treated period (Eq. (3) exact) but would diverge from
-///     Python by 0.5 periods, breaking the end-to-end parity tests
-///     (`test_joint_outer_convergence_parity.do`, CPS / PWT).
+///     the released numerical baseline by 0.5 periods, breaking the
+///     end-to-end fidelity tests (`test_joint_outer_convergence_parity.do`,
+///     CPS / PWT).
 ///
 ///   δ_unit[j] = exp(−λ_unit · RMSE_j)
 ///     where RMSE_j is the RMSE of unit j's pre-treatment outcomes against
@@ -343,18 +343,16 @@ pub fn compute_joint_weight_vectors(
     // δ_time[s] = exp(−λ_time · |s − center|), with
     //     center = T − T_post / 2     (midpoint of the treated block)
     //
-    // This matches the Python reference
-    // (`diff_diff.trop_global._compute_global_weights`) verbatim; the
+    // Paper Eq. (3) is defined per *target* treated period in Algorithm 1;
+    // Remark 6.1 is silent on the concrete aggregation kernel under the
+    // shared-weight (joint) setting, so the post-block midpoint is adopted
+    // here as an engineering choice.  The
     // `test_joint_outer_convergence_parity.do` regression suite locks the
-    // end-to-end ATT to that reference on CPS log-wage, PWT log-GDP, and
-    // the simulated seed-42 panel at tol = 1e-6.  Paper Eq. (3) is defined
-    // per *target* treated period in Algorithm 1, and Remark 6.1 is silent
-    // on the concrete aggregation kernel under the shared-weight (joint)
-    // setting, so the Python midpoint convention is preserved as the
-    // numerical ground truth.  T_post = 1 is intentionally *not*
-    // special-cased to `center = T − 1`: doing so would be a cleaner
-    // match to Eq. (3) but would break parity with Python by 0.5 periods
-    // at the treated cell.
+    // end-to-end ATT to the released numerical baseline on CPS log-wage,
+    // PWT log-GDP, and the simulated seed-42 panel at tol = 1e-6.
+    // T_post = 1 is intentionally *not* special-cased to `center = T − 1`:
+    // doing so would be a cleaner match to Eq. (3) but would break the
+    // released-baseline fidelity by 0.5 periods at the treated cell.
     let center = n_periods as f64 - treated_periods as f64 / 2.0;
     let mut delta_time = Array1::<f64>::zeros(n_periods);
     for t in 0..n_periods {
@@ -725,20 +723,20 @@ mod tests {
         }
     }
 
-    /// Python-parity guard (supersedes the reverted P0-3 draft): for the
-    /// homogeneous-τ aggregation in `compute_joint_weight_vectors` we
+    /// Numerical-baseline guard (supersedes the reverted P0-3 draft): for
+    /// the homogeneous-τ aggregation in `compute_joint_weight_vectors` we
     /// deliberately keep `center = T − T_post / 2` even when `T_post = 1`,
-    /// matching the Python reference
-    /// (`diff_diff.trop_global._compute_global_weights`).  An earlier draft
-    /// "fixed" T_post = 1 to `center = T − 1` on the grounds that it recovers
-    /// paper Eq. (3) exactly; that draft passed this unit test but broke the
+    /// matching the released numerical baseline.  An earlier draft "fixed"
+    /// T_post = 1 to `center = T − 1` on the grounds that it recovers paper
+    /// Eq. (3) exactly; that draft passed this unit test but broke the
     /// end-to-end `test_joint_outer_convergence_parity.do` regressions on
     /// CPS log-wage (|Δτ| ≈ 2.94e-4) and PWT log-GDP (|Δτ| ≈ 6.32e-4), which
-    /// lock the ATT to diff-diff 3.1.1 at tol = 1e-6.  Python parity wins
-    /// per the AGENTS.md contract ("Python reference as truth"), so we pin
-    /// the 0.5-period offset here as the intended behavior.
+    /// lock the ATT to the numerical baseline at tol = 1e-6.  Paper Remark
+    /// 6.1 leaves the joint aggregation kernel unspecified, so the
+    /// engineering choice (post-block midpoint) is preserved as the
+    /// intended behavior; the 0.5-period offset is pinned here.
     #[test]
-    fn test_joint_weights_time_single_post_period_matches_python_midpoint() {
+    fn test_joint_weights_time_single_post_period_matches_midpoint() {
         let y = array![
             [1.0, 2.0],
             [2.0, 3.0],
@@ -761,7 +759,7 @@ mod tests {
 
         let delta = compute_joint_weights(&y.view(), &d.view(), lambda_time, 0.0, treated_periods);
 
-        // Python convention: center = T − T_post / 2 = 5 − 0.5 = 4.5.
+        // Engineering-choice convention: center = T − T_post / 2 = 5 − 0.5 = 4.5.
         // With λ_unit = 0 the unit factor is 1 on control cells so δ[s, 0] == δ_time[s].
         let center = n_periods as f64 - treated_periods as f64 / 2.0;
         for s in 0..n_periods {
@@ -769,7 +767,7 @@ mod tests {
             let actual = delta[[s, 0]];
             assert!(
                 (actual - expected).abs() < 1e-10,
-                "joint δ_time[s={}] must use the Python midpoint center (T − T_post/2): \
+                "joint δ_time[s={}] must use the post-block midpoint center (T − T_post/2): \
                  expected {}, got {}",
                 s,
                 expected,
@@ -781,12 +779,13 @@ mod tests {
         // midpoint center, so δ_time[T−1] = exp(−λ_time · 0.5) < 1.  This
         // is the 0.5-period offset relative to a hypothetical "center =
         // treated period" kernel; we lock it in so any future refactor has
-        // to opt in consciously if it intends to diverge from Python.
+        // to opt in consciously if it intends to diverge from the
+        // released numerical baseline.
         let expected_at_treated = (-lambda_time * 0.5f64).exp();
         assert!(
             (delta[[n_periods - 1, 0]] - expected_at_treated).abs() < 1e-12,
             "joint δ_time at the treated period must equal exp(−λ_time · 0.5) \
-             under Python midpoint parity; got {}, expected {}",
+             under post-block midpoint convention; got {}, expected {}",
             delta[[n_periods - 1, 0]],
             expected_at_treated
         );
