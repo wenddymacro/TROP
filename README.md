@@ -5,6 +5,8 @@
 [![Stata 17+](https://img.shields.io/badge/Stata-17%2B-blue.svg)](https://www.stata.com/)
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](LICENSE)
 [![Version: 1.0.0](https://img.shields.io/badge/Version-1.0.0-green.svg)]()
+[![Build](https://github.com/gorgeousfish/TROP/actions/workflows/build-plugins.yml/badge.svg)](https://github.com/gorgeousfish/TROP/actions/workflows/build-plugins.yml)
+![Platforms](https://img.shields.io/badge/platforms-macOS%20|%20Linux%20|%20Windows-blue)
 
 ![trop](image/image.png)
 
@@ -64,11 +66,20 @@ The TROP framework nests existing estimators:
 
 - Stata 17.0 or later
 - No additional Stata packages required
-- Precompiled plugin included for macOS ARM64 (Apple Silicon); other platforms can be built from the Rust source
+- Precompiled plugins included for all major platforms (see below)
 
 ## Installation
 
-### Install the package
+### Supported Platforms
+
+| Platform | Plugin File | Status |
+|----------|-------------|--------|
+| macOS Apple Silicon (ARM64) | `trop_macos_arm64.plugin` | ✅ Precompiled |
+| macOS Intel (x86-64) | `trop_macos_x64.plugin` | ✅ Precompiled |
+| Linux x86-64 | `trop_linux_x64.plugin` | ✅ Precompiled |
+| Windows x86-64 | `trop_windows_x64.plugin` | ✅ Precompiled |
+
+### Option A: Install from GitHub (recommended)
 
 ```stata
 net install trop, from("https://raw.githubusercontent.com/gorgeousfish/TROP/main") replace
@@ -77,7 +88,15 @@ net install trop, from("https://raw.githubusercontent.com/gorgeousfish/TROP/main
 This automatically installs:
 - All commands and help files
 - Pre-compiled Mata library
-- macOS ARM64 plugin
+- Platform-specific plugin for your system
+
+### Option B: Local Installation
+
+If you have downloaded or cloned the repository:
+
+```stata
+net install trop, from("/path/to/TROP") replace
+```
 
 ### Verify Installation
 
@@ -644,6 +663,8 @@ This formulation encompasses DID, SC, MC, and SDID all as special cases. For $\l
 
 ### Triple Robustness Property
 
+For the underlying concepts, see [Key Concepts](#key-concepts) above.
+
 The bias satisfies a multiplicative bound (Theorem 5.1):
 
 $$\left|\mathbb{E}[\hat{\tau} - \tau \mid \mathbf{L}]\right| \leq \|\Delta^{\mathbf{u}}(\omega, \Gamma)\|_2 \times \|\Delta^{\mathbf{t}}(\theta, \Lambda)\|_2 \times \|B\|_*$$
@@ -653,8 +674,6 @@ where $\Delta^{\mathbf{u}}$ is unit imbalance, $\Delta^{\mathbf{t}}$ is time imb
 1. Balance over unit factor loadings ($\|\Delta^{\mathbf{u}}\|_2 \approx 0$)
 2. Balance over time factor loadings ($\|\Delta^{\mathbf{t}}\|_2 \approx 0$)
 3. Correct regression adjustment specification ($\|B\|_* \approx 0$)
-
-This *multiplicative* bias bound is strictly tighter than the *additive* bounds that govern DID, SC, and SDID, giving TROP stronger robustness properties.
 
 ### Tuning Parameter Selection
 
