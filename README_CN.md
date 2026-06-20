@@ -64,7 +64,15 @@ TROP 框架嵌套了现有估计量：
 
 - Stata 17.0 或更高版本
 - 无需额外安装其他 Stata 包
-- 已包含预编译插件（macOS ARM64 Apple Silicon）；其他平台可从 Rust 源码构建
+- 已包含预编译插件（macOS ARM64/Intel、Windows x64）
+
+### 支持平台
+
+| 平台 | 插件文件 | 状态 |
+|------|----------|------|
+| macOS Apple Silicon (ARM64) | `trop_macos_arm64.plugin` | ✅ 预编译 |
+| macOS Intel (x86-64) | `trop_macos_x64.plugin` | ✅ 预编译 |
+| Windows x86-64 | `trop_windows_x64.plugin` | ✅ 预编译 |
 
 ## 安装
 
