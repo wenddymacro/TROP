@@ -14,7 +14,7 @@
 use crate::newlapack;
 use faer::linalg::solvers::Svd;
 use faer::Mat;
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "linux")]
 use lapack::dgelsd;
 use ndarray::{Array1, Array2, ArrayView2, Axis};
 
@@ -48,6 +48,62 @@ pub const SVD_TRUNCATION_TOL: f64 = 1e-10;
 /// If the sum of all weights falls below this threshold, the estimation
 /// is considered degenerate and returns `None`.
 pub const WEIGHT_SUM_TOL: f64 = 1e-10;
+
+/// Pure-Rust least squares solver using faer SVD (used on Windows where external
+/// LAPACK is not available during cross-compilation).
+///
+/// Solves min ||A*x - b||_2 where A is m×n in column-major layout.
+/// On success, stores the solution x in `b[0..n_cols]` and returns true.
+#[cfg(target_os = "windows")]
+fn faer_solve_lstsq_colmajor(
+    m: usize,
+    n_cols: usize,
+    a_colmajor: &[f64],
+    b: &mut [f64],
+    rcond: f64,
+) -> bool {
+    // Convert column-major A to faer Mat
+    let faer_a = Mat::from_fn(m, n_cols, |i, j| a_colmajor[j * m + i]);
+    let faer_b = Mat::from_fn(m, 1, |i, _| b[i]);
+
+    // Compute thin SVD
+    let svd = match Svd::new(faer_a.as_ref()) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+
+    let u = svd.U();
+    let s_diag = svd.S().column_vector();
+    let v = svd.V();
+    let k = m.min(n_cols); // number of singular values
+
+    // Determine threshold for singular value truncation
+    let s_max = if k > 0 { s_diag[0].abs() } else { 0.0 };
+    let threshold = rcond * s_max;
+
+    // Pseudoinverse solve: x = V * S^{-1} * U^T * b
+    // with singular value truncation
+    for j in 0..n_cols {
+        b[j] = 0.0;
+    }
+    for idx in 0..k {
+        let sv = s_diag[idx];
+        if sv.abs() <= threshold {
+            continue;
+        }
+        // Compute U[:,idx]^T * b_original
+        let mut utb = 0.0;
+        for i in 0..m {
+            utb += u[(i, idx)] * faer_b[(i, 0)];
+        }
+        let coeff = utb / sv;
+        // Accumulate V[:,idx] * coeff
+        for j in 0..n_cols {
+            b[j] += v[(j, idx)] * coeff;
+        }
+    }
+    true
+}
 
 /// Debug-only check that `delta` is already (1 − D)-masked.
 ///
@@ -872,6 +928,18 @@ pub fn solve_joint_no_lowrank(
     let eps = f64::EPSILON;
     let rcond = (eps * (m.max(n) as f64)).max(1e-12);
 
+    // Windows: use pure-Rust faer SVD solver (no LAPACK needed).
+    #[cfg(target_os = "windows")]
+    {
+        if !faer_solve_lstsq_colmajor(m as usize, n as usize, &a_mat, &mut b_vec, rcond) {
+            return None;
+        }
+    }
+
+    // macOS/Linux: use LAPACK dgelsd (workspace query + solve).
+    #[cfg(not(target_os = "windows"))]
+    {
+
     // Output rank
     let mut rank: i32 = 0;
 
@@ -903,7 +971,7 @@ pub fn solve_joint_no_lowrank(
             &mut info,
         );
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "linux")]
     unsafe {
         dgelsd(
             m,
@@ -980,7 +1048,7 @@ pub fn solve_joint_no_lowrank(
             lwork, &mut iwork, &mut info,
         );
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "linux")]
     unsafe {
         dgelsd(
             m, n, nrhs, &mut a_mat, lda, &mut b_vec, ldb, &mut s, rcond, &mut rank, &mut work,
@@ -991,6 +1059,8 @@ pub fn solve_joint_no_lowrank(
     if info != 0 {
         return None;
     }
+
+    } // end #[cfg(not(target_os = "windows"))]
 
     // Extract solution: b_vec[0..n_params] holds the least-squares coefficients.
     let mu = b_vec[0];

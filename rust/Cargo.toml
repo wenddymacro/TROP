@@ -30,16 +30,17 @@ lapack-src = { version = "0.10", features = ["accelerate"] }
 lapack-src = { version = "0.10", features = ["openblas"] }
 openblas-src = { version = "0.10", features = ["system"] }
 
-# Windows: Intel MKL static linking (auto-download)
-[target.'cfg(target_os = "windows")'.dependencies]
-lapack-src = { version = "0.10", features = ["intel-mkl"] }
-intel-mkl-src = { version = "0.8", features = ["mkl-static-lp64-seq"] }
+# Windows: uses faer (pure-Rust SVD) — no external BLAS/LAPACK needed.
+# This enables cross-compilation from macOS without requiring Intel MKL download.
 
 [dev-dependencies]
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 proptest = "1.4"
 criterion = "0.5"
+
+[build-dependencies]
+cc = "1.0"
 
 [[bench]]
 name = "distance_bench"

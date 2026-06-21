@@ -7,6 +7,7 @@
 //! All matrix arguments follow column-major (Fortran) layout so that Stata
 //! matrices can be passed without transposition.
 
+#[cfg(not(target_os = "windows"))]
 extern crate lapack_src;
 
 pub mod bootstrap;
