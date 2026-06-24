@@ -458,9 +458,9 @@ net get trop
 | ---------------------------- | ---------------------------------------------------------- | ---------- |
 | `covariates(varlist)`        | 时不变协变量 X_i'γ 调整（论文 6.2 节公式 14）         | —          |
 | `twostep_loocv(string)`      | Twostep LOOCV 策略：`cycling`（默认）或 `exhaustive`      | `cycling`  |
-| `joint_loocv(string)`        | Joint LOOCV 策略：`cycling`（默认）或 `exhaustive`        | `cycling`  |
-| `vlevel(integer)`            | 详细程度 (-1 到 3)；-1 抑制所有输出                       | `-1`       |
-| `singleunit(string)`         | 单 PSU 分层处理：`certainty`、`scaled`、`centered`        | `certainty`|
+| `joint_loocv(string)`        | Joint LOOCV 策略：`cycling` 或 `exhaustive`（默认）      | `exhaustive` |
+| `vlevel(integer)`            | 详细程度 (0-4): 0=静默, 1=简略, 2=详细, 3=调试, 4=跟踪  | `0`        |
+| `singleunit(string)`         | 单 PSU 分层处理：`skip`（省略）、`centered`（总均值校正）  | `skip`     |
 | `strata(varname)`            | Rao-Wu Bootstrap 的分层变量                               | —          |
 | `psu(varname)`               | 初级抽样单位变量                                           | —          |
 | `fpc(varname)`               | 有限总体校正变量                                           | —          |

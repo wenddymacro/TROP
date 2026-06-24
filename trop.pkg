@@ -66,10 +66,9 @@ f mata/trop_lambda_grid.mata
 f mata/trop_main.mata
 f mata/trop_eventstudy.mata
 d
-d === Pre-compiled Plugins (all platforms) ===
+d === Pre-compiled Plugins ===
 f ado/trop_macos_arm64.plugin
 f ado/trop_macos_x64.plugin
-f ado/trop_linux_x64.plugin
 f ado/trop_windows_x64.plugin
 d
 d === License ===
@@ -85,7 +84,5 @@ g data/germany_gdp.dta
 g data/basque_gdp.dta
 g data/smoking_packs.dta
 d
-d === Ancillary Files (install via: net get trop) ===
-g ancillary/10_trop_stata.ipynb
 d === Ancillary Files (install via: net get trop) ===
 g ancillary/10_trop_stata.ipynb

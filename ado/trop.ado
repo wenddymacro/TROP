@@ -92,7 +92,7 @@ program define trop, eclass
         PSU(varname)                        /// survey: primary sampling unit variable
         FPC(varname)                        /// survey: finite population correction variable
         NEST                                /// survey: nest PSU within strata
-        SINGLEUnit(string)                  /// survey: lonely PSU strategy: "centered" (default) or "skip"
+        SINGLEUnit(string)                  /// survey: lonely PSU strategy: "skip" (default) or "centered"
         COVariates(varlist)                 /// covariates for Eq.14 adjustment (Section 6.2)
         VERbose                             /// display progress and diagnostic messages (sets level 2)
         VLevel(integer -1)                  /// verbose level: 0=quiet 1=normal 2=detailed 3=debug 4=dev

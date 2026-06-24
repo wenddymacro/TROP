@@ -459,9 +459,9 @@ Post-estimation (available after `trop`):
 
 | `covariates(varlist)`        | Time-invariant covariates for X_i'γ adjustment (paper Section 6.2 Eq. 14) | —          |
 | `twostep_loocv(string)`      | Twostep LOOCV strategy: `cycling` (default) or `exhaustive`    | `cycling`  |
-| `joint_loocv(string)`        | Joint LOOCV strategy: `cycling` (default) or `exhaustive`      | `cycling`  |
-| `vlevel(integer)`            | Verbosity level (-1 to 3); -1 suppresses all output            | `-1`       |
-| `singleunit(string)`         | Single-PSU stratum handling: `certainty`, `scaled`, `centered` | `certainty`|
+| `joint_loocv(string)`        | Joint LOOCV strategy: `cycling` or `exhaustive` (default)      | `exhaustive` |
+| `vlevel(integer)`            | Verbosity level (0-4): 0=silent, 1=minimal, 2=detailed, 3=debug, 4=trace | `0`        |
+| `singleunit(string)`         | Single-PSU stratum handling: `skip` (omit), `centered` (grand-mean correction) | `skip`     |
 | `strata(varname)`            | Stratification variable for Rao-Wu bootstrap                   | —          |
 | `psu(varname)`               | Primary sampling unit variable                                  | —          |
 | `fpc(varname)`               | Finite population correction variable                           | —          |
@@ -588,11 +588,6 @@ enabled, so downstream code can switch `cimethod()` without re-estimating.
 | `e(n_covariates)`         | Number of covariates (0 if none)           |
 | `e(deff_weights)`         | Kish design effect of pweights             |
 
-| `e(loocv_rmse)`            | LOOCV RMSE = sqrt(Q(lambda_hat) / n_valid) |
-| `e(condition_number)`       | WLS design matrix condition number         |
-| `e(bootstrap_fail_rate)`    | Bootstrap failure rate (0 to 1)            |
-| `e(n_covariates)`           | Number of covariates (0 if none)           |
-| `e(deff_weights)`           | Kish design effect of pweights             |
 
 ### Macros
 
@@ -620,14 +615,6 @@ enabled, so downstream code can switch `cimethod()` without re-estimating.
 | `e(fpc_var)`           | FPC variable (survey only)                |
 | `e(bootstrap_type)`    | Bootstrap type: `standard` or `rao_wu`    |
 
-| `e(twostep_loocv)`       | Twostep LOOCV strategy: `cycling` or `exhaustive` |
-| `e(joint_loocv)`         | Joint LOOCV strategy: `cycling` or `exhaustive`   |
-| `e(covariates)`          | Space-separated covariate variable names  |
-| `e(spec_string)`         | Specification string for reproducibility  |
-| `e(strata_var)`          | Stratification variable (survey only)     |
-| `e(psu_var)`             | PSU variable (survey only)                |
-| `e(fpc_var)`             | FPC variable (survey only)                |
-| `e(bootstrap_type)`      | Bootstrap type: `standard` or `rao_wu`    |
 
 ### Matrices
 
@@ -650,9 +637,6 @@ enabled, so downstream code can switch `cimethod()` without re-estimating.
 | `e(lambda_time_grid)`    | Lambda time grid values                              |
 | `e(lambda_unit_grid)`    | Lambda unit grid values                              |
 | `e(lambda_nn_grid)`      | Lambda nuclear norm grid values                      |
-| `e(gamma)`               | Covariate coefficients (1×p; only with `covariates()`) |
-| `e(lambda_grid)`         | Cartesian product of lambda grids (K×3)               |
-| `e(cv_curve)`            | LOOCV scores at grid points (K×4)                    |
 | `e(gamma)`               | Covariate coefficients (1×p; only with `covariates()`) |
 | `e(lambda_grid)`         | Cartesian product of lambda grids (K×3)               |
 | `e(cv_curve)`            | LOOCV scores at grid points (K×4)                    |
