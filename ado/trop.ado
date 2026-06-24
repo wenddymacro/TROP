@@ -74,9 +74,15 @@ program define trop, eclass
         LAMbda_time_grid(numlist)                   /// user-supplied lambda_time grid
         LAMbda_unit_grid(numlist)                   /// user-supplied lambda_unit grid
         LAMbda_nn_grid(numlist missingokay)         /// user-supplied lambda_nn grid (`.` = inf)
-        FIXEDlambda(numlist missingokay min=3 max=3) /// fixed (l_time l_unit l_nn); `.` = inf for l_nn
+        FIXEDlambda(string)                  /// fixed (l_time l_unit l_nn); `.` = inf for l_nn
         TOL(real 1e-6)                      /// convergence tolerance for iterative estimation
-        MAXiter(integer 500)                /// maximum iterations for iterative estimation
+        MAXiter(integer 500)                /// maximum iterations for alternating minimization
+                                            ///   Paper Algorithm 2/3 four-step ALS requires
+                                            ///   sufficient iterations to guarantee convergence.
+                                            ///   Theorem 8.1 convergence rate is O(1/k); 500
+                                            ///   steps ensures residual < 1e-6 in practice.
+                                            ///   100 steps may be insufficient when p > 20
+                                            ///   covariates or condition number is large.
         BOOTstrap(integer 200)              /// number of bootstrap replications (paper Alg 3 default; 0 = skip)
         BSalpha(real -1)                    /// deprecated; retained for backward compatibility
         SEED(integer 42)                    /// RNG seed for bootstrap
@@ -86,8 +92,11 @@ program define trop, eclass
         PSU(varname)                        /// survey: primary sampling unit variable
         FPC(varname)                        /// survey: finite population correction variable
         NEST                                /// survey: nest PSU within strata
+        SINGLEUnit(string)                  /// survey: lonely PSU strategy: "centered" (default) or "skip"
         COVariates(varlist)                 /// covariates for Eq.14 adjustment (Section 6.2)
-        VERbose                             /// display progress and diagnostic messages
+        VERbose                             /// display progress and diagnostic messages (sets level 2)
+        VLevel(integer -1)                  /// verbose level: 0=quiet 1=normal 2=detailed 3=debug 4=dev
+        NOTIMing                            /// suppress timing estimate display
         Level(cilevel)                      /// confidence level for bootstrap CI
         ]
 
@@ -136,6 +145,22 @@ program define trop, eclass
     }
     if "`grid_style'" == "" {
         local grid_style "default"
+    }
+    // grid_style别名映射 (入口处即转换为内部值)
+    //   standard   → default   (论文Footnote 2第一阶段粗搜索, 180组合)
+    //   exhaustive → extended  (论文Table 2所有最优值穷举覆盖)
+    if "`grid_style'" == "standard" {
+        local grid_style "default"
+    }
+    else if "`grid_style'" == "exhaustive" {
+        local grid_style "extended"
+    }
+    if !inlist("`grid_style'", "default", "fine", "extended") {
+        di as error "grid_style() must be one of: standard (=default), fine, exhaustive (=extended)"
+        di as error "  standard/default : 180 combinations (6 x 6 x 5)"
+        di as error "  fine             : 343 combinations (7 x 7 x 7)"
+        di as error "  exhaustive/extended : 4,256 combinations (includes DID/TWFE corner)"
+        exit 198
     }
     if "`joint_loocv'" == "" {
         // Default to exhaustive Cartesian search: the joint objective has a
@@ -325,11 +350,30 @@ program define trop, eclass
     // --- Covariate validation ------------------------------------------------
     local _n_covariates = 0
     if "`covariates'" != "" {
+        // Check each covariate is numeric
         foreach var of local covariates {
             capture confirm numeric variable `var'
             if _rc {
                 di as error "covariate '`var'' must be a numeric variable"
                 exit 111
+            }
+        }
+        // Covariates must not overlap with depvar or treatvar
+        foreach var of local covariates {
+            if "`var'" == "`depvar'" | "`var'" == "`treatvar'" {
+                di as error "covariate '`var'' cannot be the outcome or treatment variable"
+                exit 198
+            }
+        }
+        // Check for missing values in the estimation sample
+        foreach var of local covariates {
+            quietly count if missing(`var') & `touse'
+            if r(N) > 0 {
+                display as error "covariate `var' has `r(N)' missing value(s) in the estimation sample"
+                display as error "TROP requires complete covariate data. Options:"
+                display as error "  1. Drop observations: drop if missing(`var')"
+                display as error "  2. Impute missing values before estimation"
+                exit 416
             }
         }
         local _n_covariates : word count `covariates'
@@ -484,6 +528,22 @@ program define trop, eclass
         mata: st_global("__trop_fpc_var", "`fpc'")
         scalar __trop_has_survey_design = 1
         scalar __trop_survey_nest = `_survey_nest'
+        // Parse singleunit() option for lonely PSU handling
+        // Codes: 0 = skip (default backward compat), 1 = centered
+        local _lonely_psu_code = 0  // default: skip (backward compatible)
+        if "`singleunit'" != "" {
+            if "`singleunit'" == "skip" {
+                local _lonely_psu_code = 0
+            }
+            else if "`singleunit'" == "centered" {
+                local _lonely_psu_code = 1
+            }
+            else {
+                di as error "singleunit() must be 'centered' or 'skip'; got '`singleunit''"
+                exit 198
+            }
+        }
+        scalar __trop_lonely_psu = `_lonely_psu_code'
         if "`verbose'" != "" {
             di as txt _n "Survey design detected (Rao-Wu bootstrap):"
             di as txt "  Strata: `strata'"
@@ -499,6 +559,7 @@ program define trop, eclass
     else {
         scalar __trop_has_survey_design = 0
         scalar __trop_survey_nest = 0
+        scalar __trop_lonely_psu = 0
         mata: st_global("__trop_strata_var", "")
         mata: st_global("__trop_psu_var", "")
         mata: st_global("__trop_fpc_var", "")
@@ -548,15 +609,53 @@ program define trop, eclass
     local lambda_nn_val = .
 
     if "`fixedlambda'" != "" {
-        local n_fixed : word count `fixedlambda'
-        if `n_fixed' != 3 {
-            di as error "fixedlambda() requires exactly 3 values: lambda_time lambda_unit lambda_nn"
-            di as error "  Example: fixedlambda(0.5 1.0 0.1)"
-            exit 198
+        // Detect named format: lt()/lu()/lnn()
+        local _fl_named = 0
+        if strpos("`fixedlambda'", "lt(") > 0 | strpos("`fixedlambda'", "lu(") > 0 | strpos("`fixedlambda'", "lnn(") > 0 {
+            local _fl_named = 1
         }
-        local lambda_time_val : word 1 of `fixedlambda'
-        local lambda_unit_val : word 2 of `fixedlambda'
-        local lambda_nn_val : word 3 of `fixedlambda'
+
+        if `_fl_named' {
+            // Parse named format: fixedlambda(lt(#) lu(#) lnn(#))
+            local _tmp "`fixedlambda'"
+            local lambda_time_val ""
+            local lambda_unit_val ""
+            local lambda_nn_val ""
+
+            // Extract lt(value)
+            if regexm("`_tmp'", "lt\\(([^)]+)\\)") {
+                local lambda_time_val = regexs(1)
+            }
+            // Extract lu(value)
+            if regexm("`_tmp'", "lu\\(([^)]+)\\)") {
+                local lambda_unit_val = regexs(1)
+            }
+            // Extract lnn(value)
+            if regexm("`_tmp'", "lnn\\(([^)]+)\\)") {
+                local lambda_nn_val = regexs(1)
+            }
+
+            // Validate all three parameters provided
+            if "`lambda_time_val'" == "" | "`lambda_unit_val'" == "" | "`lambda_nn_val'" == "" {
+                di as error "fixedlambda() named format requires all three: lt(#) lu(#) lnn(#)"
+                di as error "  lt  = lambda_time (Eq.3 time decay parameter)"
+                di as error "  lu  = lambda_unit (Eq.3 unit decay parameter)"
+                di as error "  lnn = lambda_nn (nuclear norm regularization)"
+                exit 198
+            }
+        }
+        else {
+            // Positional format: fixedlambda(lambda_time lambda_unit lambda_nn)
+            local n_fixed : word count `fixedlambda'
+            if `n_fixed' != 3 {
+                di as error "fixedlambda() requires exactly 3 values: lambda_time lambda_unit lambda_nn"
+                di as error "  or use named format: fixedlambda(lt(#) lu(#) lnn(#))"
+                exit 198
+            }
+            local lambda_time_val : word 1 of `fixedlambda'
+            local lambda_unit_val : word 2 of `fixedlambda'
+            local lambda_nn_val : word 3 of `fixedlambda'
+        }
 
         // λ_time and λ_unit must be non-negative finite numbers.  Per paper
         // Eq 3 the weights θ,ω are exp(−λ·dist); λ_time/λ_unit = ∞ would
@@ -615,6 +714,59 @@ program define trop, eclass
         }
     }
     
+    // --- Timing estimate (pure display, no effect on computation) ----------
+    // Based on algorithm complexity: twostep O(grid×N_treated×iters×N×T),
+    // joint O(grid×iters×N×T), plus bootstrap multiplier.
+    if "`notiming'" == "" {
+        local _panel_size = `N' * `T_val'
+        if `_panel_size' >= 50000 {
+            // Calibration constants (conservative, macOS ARM64 baseline)
+            local _ops_per_sec = 50000000
+            local _avg_iters = 30
+
+            // LOOCV cost
+            if `run_cv' {
+                if "`method'" == "twostep" {
+                    local _complexity = `n_combinations' * `N_treated_units' * `_avg_iters' * `_panel_size'
+                }
+                else {
+                    local _complexity = `n_combinations' * `_avg_iters' * `_panel_size'
+                }
+            }
+            else {
+                // fixedlambda: only estimation, no grid search
+                if "`method'" == "twostep" {
+                    local _complexity = `N_treated_units' * `_avg_iters' * `_panel_size'
+                }
+                else {
+                    local _complexity = `_avg_iters' * `_panel_size'
+                }
+            }
+
+            // Bootstrap multiplier
+            if `bootstrap' > 0 {
+                if "`method'" == "twostep" {
+                    local _bs_cost = `bootstrap' * `N_treated_units' * `_avg_iters' * `_panel_size'
+                }
+                else {
+                    local _bs_cost = `bootstrap' * `_avg_iters' * `_panel_size'
+                }
+                local _complexity = `_complexity' + `_bs_cost'
+            }
+
+            local _est_seconds = `_complexity' / `_ops_per_sec'
+
+            if `_panel_size' >= 500000 {
+                local _est_minutes = `_est_seconds' / 60
+                di as txt _n "{it:预计计算时间: ~" %4.1f `_est_minutes' " 分钟}"
+            }
+            else {
+                di as txt _n "{it:预计计算时间: ~" %4.0f `_est_seconds' " 秒}"
+            }
+            di as txt "{it:(使用 notiming 选项可隐藏此信息)}"
+        }
+    }
+
     // --- Estimation --------------------------------------------------------
     if "`verbose'" != "" {
         di as txt _n "Running TROP estimation..."
@@ -633,7 +785,23 @@ program define trop, eclass
         }
     }
 
-    local verbose_flag = ("`verbose'" != "")
+    // --- Verbose level resolution -------------------------------------------
+    // vlevel() takes precedence; otherwise `verbose` flag => level 2 (DETAILED);
+    // default (neither specified) => level 1 (NORMAL: progress milestones).
+    // Level 0 (QUIET) suppresses all non-error output.
+    local _verbose_level = 1
+    if `vlevel' >= 0 {
+        local _verbose_level = `vlevel'
+    }
+    else if "`verbose'" != "" {
+        local _verbose_level = 2
+    }
+    local verbose_flag = `_verbose_level'
+    // Ensure backward-compat: existing `if "`verbose'" != ""` guards fire
+    // whenever the resolved level is >= 2 (DETAILED).
+    if `_verbose_level' >= 2 & "`verbose'" == "" {
+        local verbose "verbose"
+    }
     local cv_mode = "exact"
 
     // The seed is forwarded to the plugin's internal RNG; Stata's global
@@ -785,6 +953,13 @@ program define trop, eclass
     mata: st_global("__trop_panel_idx_var", "`panel_idx'")
     mata: st_global("__trop_time_idx_var", "`time_idx'")
 
+    // Build specification string for e(spec_string) — records the call
+    // parameters so downstream consumers can reproduce the estimation.
+    global __trop_spec_string "method(`method'), lambda_time(`lambda_time_val'), lambda_unit(`lambda_unit_val'), lambda_nn(`lambda_nn_val')"
+    if "`covariates'" != "" {
+        global __trop_spec_string "${__trop_spec_string}, covariates(`covariates')"
+    }
+
     // Transfer remaining estimation results from plugin temporaries to e()
     mata: trop_store_results("`method'")
 
@@ -840,6 +1015,7 @@ program define trop, eclass
     // --- Drop plugin temporaries ------------------------------------------
     // All code that reads __trop_* scalars or matrices must appear above.
     capture scalar drop __trop_att __trop_se
+    capture scalar drop __trop_deff_weights __trop_max_fh __trop_n_high_fpc
     capture mata: trop_cleanup_temp_vars()
 
     // --- Store estimation metadata ----------------------------------------
@@ -908,6 +1084,19 @@ program define trop, eclass
         ereturn scalar has_survey_design = 1
         ereturn scalar survey_nest = `_survey_nest'
         ereturn local bootstrap_type "rao_wu"
+        // Survey diagnostics: DEFF and high-FPC (P2 diagnostics)
+        capture confirm scalar __trop_deff_weights
+        if !_rc {
+            ereturn scalar deff_weights = scalar(__trop_deff_weights)
+        }
+        capture confirm scalar __trop_max_fh
+        if !_rc {
+            ereturn scalar max_fh = scalar(__trop_max_fh)
+        }
+        capture confirm scalar __trop_n_high_fpc
+        if !_rc {
+            ereturn scalar n_high_fpc = scalar(__trop_n_high_fpc)
+        }
     }
     else {
         ereturn scalar has_survey_design = 0
@@ -1227,6 +1416,28 @@ program define trop, eclass
         di as txt "{it:  Standard errors per Athey et al. (2025) Algorithm 3 require bootstrap.}"
         di as txt "{it:  To enable inference, re-run without bootstrap(0) (default is 200 reps),}"
         di as txt "{it:  or call: trop_bootstrap, nreps(200)}"
+    }
+
+    // --- Survey diagnostics display (P2) ------------------------------------
+    if `_has_survey_design' & `bootstrap' > 0 {
+        // Weight DEFF diagnostic
+        capture confirm scalar e(deff_weights)
+        if !_rc & !missing(e(deff_weights)) {
+            if e(deff_weights) > 2 {
+                di as txt _n "{it:Note: Weights design effect = " as res %5.2f e(deff_weights) as txt " > 2, indicating substantial efficiency loss from unequal weighting.}"
+            }
+        }
+        // High-FPC diagnostic
+        capture confirm scalar e(n_high_fpc)
+        if !_rc & !missing(e(n_high_fpc)) {
+            if e(n_high_fpc) > 0 {
+                capture confirm scalar e(max_fh)
+                if !_rc & !missing(e(max_fh)) {
+                    di as txt "{it:Note: " as res e(n_high_fpc) as txt " stratum/strata have sampling fraction f_h > 0.5 (max f_h = " as res %5.3f e(max_fh) as txt ").}"
+                    di as txt "{it:       FPC correction is active and significantly reduces variance.}"
+                }
+            }
+        }
     }
 
     di as txt "{hline 78}"

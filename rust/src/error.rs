@@ -59,6 +59,16 @@ pub enum TropError {
     /// Unclassified numerical or logical error (code 11).
     #[error("Computation failure")]
     Computation = 11,
+
+    /// FPC value is invalid: non-positive, non-finite, or less than the
+    /// number of sampled PSUs in a stratum (code 12).
+    #[error("Invalid FPC value")]
+    InvalidFpc = 12,
+
+    /// A singleton stratum (n_h=1) was encountered in strict mode where
+    /// no lonely-PSU adjustment is allowed (code 13).
+    #[error("Singleton PSU stratum with no adjustment")]
+    SingletonPsu = 13,
 }
 
 impl TropError {
@@ -85,6 +95,8 @@ impl TropError {
             9 => Some(TropError::LoocvFail),
             10 => Some(TropError::BootstrapFail),
             11 => Some(TropError::Computation),
+            12 => Some(TropError::InvalidFpc),
+            13 => Some(TropError::SingletonPsu),
             _ => None,
         }
     }
@@ -124,12 +136,16 @@ mod tests {
         assert_eq!(TropError::LoocvFail.code(), 9);
         assert_eq!(TropError::BootstrapFail.code(), 10);
         assert_eq!(TropError::Computation.code(), 11);
+        assert_eq!(TropError::InvalidFpc.code(), 12);
+        assert_eq!(TropError::SingletonPsu.code(), 13);
     }
 
     #[test]
     fn test_from_code() {
         assert_eq!(TropError::from_code(0), Some(TropError::Success));
         assert_eq!(TropError::from_code(5), Some(TropError::Convergence));
+        assert_eq!(TropError::from_code(12), Some(TropError::InvalidFpc));
+        assert_eq!(TropError::from_code(13), Some(TropError::SingletonPsu));
         assert_eq!(TropError::from_code(99), None);
     }
 
@@ -143,5 +159,161 @@ mod tests {
     fn test_is_success() {
         assert!(TropError::Success.is_success());
         assert!(!TropError::Convergence.is_success());
+    }
+}
+
+#[cfg(test)]
+mod error_propagation_tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    /// All defined TropError variants for exhaustive testing.
+    fn all_variants() -> Vec<TropError> {
+        vec![
+            TropError::Success,
+            TropError::NullPointer,
+            TropError::InvalidDimension,
+            TropError::NoControl,
+            TropError::NoTreated,
+            TropError::Convergence,
+            TropError::Singular,
+            TropError::Memory,
+            TropError::RustPanic,
+            TropError::LoocvFail,
+            TropError::BootstrapFail,
+            TropError::Computation,
+            TropError::InvalidFpc,
+            TropError::SingletonPsu,
+        ]
+    }
+
+    /// Verify all error codes are unique (no two variants share the same i32 code).
+    #[test]
+    fn test_all_error_codes_unique() {
+        let variants = all_variants();
+        let mut seen_codes = HashSet::new();
+        for v in &variants {
+            let code = v.code();
+            assert!(
+                seen_codes.insert(code),
+                "Duplicate error code {} for variant {:?}",
+                code,
+                v
+            );
+        }
+    }
+
+    /// Verify every variant has a mapping via from_code and the round-trip is consistent.
+    #[test]
+    fn test_error_code_mapping_complete() {
+        let variants = all_variants();
+        for v in &variants {
+            let code = v.code();
+            let recovered = TropError::from_code(code);
+            assert_eq!(
+                recovered,
+                Some(*v),
+                "from_code({}) should return {:?}, got {:?}",
+                code,
+                v,
+                recovered
+            );
+        }
+    }
+
+    /// Verify that codes are contiguous from 0..=max and no gaps exist.
+    #[test]
+    fn test_error_codes_contiguous() {
+        let variants = all_variants();
+        let max_code = variants.iter().map(|v| v.code()).max().unwrap();
+        for code in 0..=max_code {
+            assert!(
+                TropError::from_code(code).is_some(),
+                "Gap in error codes: code {} has no corresponding variant",
+                code
+            );
+        }
+    }
+
+    /// Verify every variant's Display output is non-empty.
+    #[test]
+    fn test_error_display_non_empty() {
+        let variants = all_variants();
+        for v in &variants {
+            let display = format!("{}", v);
+            assert!(
+                !display.is_empty(),
+                "Display for {:?} should not be empty",
+                v
+            );
+        }
+    }
+
+    /// Verify every variant's Debug output is non-empty.
+    #[test]
+    fn test_error_debug_non_empty() {
+        let variants = all_variants();
+        for v in &variants {
+            let debug = format!("{:?}", v);
+            assert!(
+                !debug.is_empty(),
+                "Debug for {:?} should not be empty",
+                v
+            );
+        }
+    }
+
+    /// Verify from_code returns None for invalid codes.
+    #[test]
+    fn test_error_invalid_codes() {
+        assert_eq!(TropError::from_code(-1), None);
+        assert_eq!(TropError::from_code(14), None);
+        assert_eq!(TropError::from_code(100), None);
+        assert_eq!(TropError::from_code(i32::MAX), None);
+        assert_eq!(TropError::from_code(i32::MIN), None);
+    }
+
+    /// Verify the Into<i32> trait implementation matches code().
+    #[test]
+    fn test_into_i32_matches_code() {
+        let variants = all_variants();
+        for v in &variants {
+            let code_method = v.code();
+            let code_into: i32 = (*v).into();
+            assert_eq!(
+                code_method, code_into,
+                "code() and Into<i32> disagree for {:?}: {} vs {}",
+                v, code_method, code_into
+            );
+        }
+    }
+
+    /// Verify is_success is only true for the Success variant.
+    #[test]
+    fn test_is_success_only_for_success() {
+        let variants = all_variants();
+        for v in &variants {
+            if *v == TropError::Success {
+                assert!(v.is_success(), "Success should report is_success=true");
+            } else {
+                assert!(!v.is_success(), "{:?} should report is_success=false", v);
+            }
+        }
+    }
+
+    /// Verify non-zero error codes for all non-Success variants (FFI contract).
+    #[test]
+    fn test_non_success_codes_nonzero() {
+        let variants = all_variants();
+        for v in &variants {
+            if *v != TropError::Success {
+                assert_ne!(
+                    v.code(),
+                    0,
+                    "Non-success variant {:?} must have non-zero code",
+                    v
+                );
+            }
+        }
     }
 }

@@ -4,14 +4,17 @@
 program define trop_p
     version 17
     syntax newvarname [if] [in], ///
-        [y0 y1 te residuals alpha beta mu XB RObust_check]
+        [y0 y1 te residuals alpha beta mu XB ///
+         ATT Counterfactual FITted RObust_check]
 
     // --- Option Validation ---
 
     // Count the number of specified prediction options; mutual exclusivity is enforced.
     local opts_count = ("`y0'"!="") + ("`y1'"!="") + ("`te'"!="") + ///
                         ("`residuals'"!="") + ("`alpha'"!="") + ///
-                        ("`beta'"!="") + ("`mu'"!="") + ("`xb'"!="")
+                        ("`beta'"!="") + ("`mu'"!="") + ("`xb'"!="") + ///
+                        ("`att'"!="") + ("`counterfactual'"!="") + ///
+                        ("`fitted'"!="")
 
     if `opts_count' > 1 {
         di as error "Only one prediction type allowed"
@@ -50,21 +53,28 @@ program define trop_p
 
     // --- Dispatch Prediction Subroutines ---
 
-    if "`y0'" != "" | "`xb'" != "" {
-        // Calculate counterfactual outcome Y(0) or linear prediction XB.
+    if "`y0'" != "" | "`xb'" != "" | "`counterfactual'" != "" {
+        // Calculate counterfactual outcome Y(0).
+        // Options y0, xb, and counterfactual are all equivalent.
         trop_predict_y0 `varlist' if `touse'
     }
     else if "`y1'" != "" {
         // Calculate counterfactual outcome Y(1).
         trop_predict_y1 `varlist' if `touse'
     }
-    else if "`te'" != "" {
+    else if "`te'" != "" | "`att'" != "" {
         // Calculate treatment effects.
+        // Options te and att are equivalent.
         trop_predict_te `varlist' if `touse'
     }
     else if "`residuals'" != "" {
-        // Calculate residuals.
+        // Calculate residuals: Y - Yhat where Yhat = Y(0) + tau*W.
         trop_predict_residuals `varlist' if `touse'
+    }
+    else if "`fitted'" != "" {
+        // Calculate fitted values: Yhat = alpha_i + beta_t + L_{it} + tau_{it}*W_{it}
+        // For control obs: Yhat = Y(0); for treated obs: Yhat = Y(0) + tau.
+        trop_predict_fitted `varlist' if `touse'
     }
     else if "`alpha'" != "" {
         // Predict alpha coefficients.
@@ -79,5 +89,3 @@ program define trop_p
         trop_predict_mu `varlist' if `touse'
     }
 end
-
-

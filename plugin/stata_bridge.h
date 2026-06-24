@@ -34,6 +34,8 @@
 #define TROP_ERR_LOOCV_FAIL     9
 #define TROP_ERR_BOOTSTRAP_FAIL 10
 #define TROP_ERR_COMPUTATION    11
+#define TROP_ERR_INVALID_FPC    12
+#define TROP_ERR_SINGLETON_PSU  13
 
 /* ============================================================================
  * Error Codes — Bridge Layer
@@ -67,11 +69,20 @@ typedef enum {
 
 /* ============================================================================
  * Verbosity Control
+ *
+ * Five levels of output detail:
+ *   0 (QUIET)    - errors only
+ *   1 (NORMAL)   - default: progress milestones (start/complete)
+ *   2 (DETAILED) - per-stage summaries and grid-point counts
+ *   3 (DEBUG)    - internal dispatch traces and parameter dumps
+ *   4 (DEV)      - developer-only: memory layouts and raw buffers
  * ============================================================================ */
 
-#define TROP_VERBOSE_QUIET  0
-#define TROP_VERBOSE_NORMAL 1
-#define TROP_VERBOSE_DEBUG  2
+#define TROP_VERBOSE_QUIET    0
+#define TROP_VERBOSE_NORMAL   1
+#define TROP_VERBOSE_DETAILED 2
+#define TROP_VERBOSE_DEBUG    3
+#define TROP_VERBOSE_DEV      4
 
 extern int g_verbose_level;
 
@@ -81,9 +92,27 @@ extern int g_verbose_level;
 
 void trop_log(int level, const char *tag, const char *fmt, ...);
 
-#define TROP_LOG_ERROR(fmt, ...) trop_log(0, "ERROR", fmt, ##__VA_ARGS__)
-#define TROP_LOG_INFO(fmt, ...)  trop_log(1, "INFO", fmt, ##__VA_ARGS__)
-#define TROP_LOG_DEBUG(fmt, ...) trop_log(2, "DEBUG", fmt, ##__VA_ARGS__)
+#define TROP_LOG_ERROR(fmt, ...)  trop_log(0, "ERROR", fmt, ##__VA_ARGS__)
+#define TROP_LOG_INFO(fmt, ...)   trop_log(1, "INFO", fmt, ##__VA_ARGS__)
+#define TROP_LOG_DETAIL(fmt, ...) trop_log(2, "DETAIL", fmt, ##__VA_ARGS__)
+#define TROP_LOG_DEBUG(fmt, ...)  trop_log(3, "DEBUG", fmt, ##__VA_ARGS__)
+#define TROP_LOG_DEV(fmt, ...)    trop_log(4, "DEV", fmt, ##__VA_ARGS__)
+
+/* ============================================================================
+ * Command Dispatch Macros
+ *
+ * PARSE_CMD_ENTRY: maps a command string to its enum value inside
+ *                  parse_command().  Reduces boilerplate strcmp chains.
+ *
+ * DISPATCH_CMD_CASE: maps a command enum to its handler function inside
+ *                    the stata_call switch block.
+ * ============================================================================ */
+
+#define PARSE_CMD_ENTRY(str, enum_val) \
+    if (strcmp(cmd, str) == 0) return enum_val;
+
+#define DISPATCH_CMD_CASE(cmd_enum, handler) \
+    case cmd_enum: rc = handler(); break;
 
 /* ============================================================================
  * Core Library FFI Declarations
@@ -241,7 +270,9 @@ extern int stata_loocv_cycling_search_joint(
     int *first_failed_i_out,
     double *stage1_lambda_time_out,
     double *stage1_lambda_unit_out,
-    double *stage1_lambda_nn_out
+    double *stage1_lambda_nn_out,
+    const double *x_ptr,
+    int n_covariates
 );
 
 /**
@@ -278,7 +309,9 @@ extern int stata_loocv_grid_search_joint(
     int *n_valid_out,
     int *n_attempted_out,
     int *first_failed_t_out,
-    int *first_failed_i_out
+    int *first_failed_i_out,
+    const double *x_ptr,
+    int n_covariates
 );
 
 /**
@@ -502,6 +535,7 @@ extern int stata_bootstrap_trop_variance_rao_wu(
     const int64_t *psu_ptr,
     const double *fpc_ptr,
     const double *unit_weights_ptr,
+    int lonely_psu_code,
     double *estimates_ptr,
     double *se_out,
     double *ci_lower_out,
@@ -536,6 +570,7 @@ extern int stata_bootstrap_trop_variance_rao_wu_joint(
     const int64_t *psu_ptr,
     const double *fpc_ptr,
     const double *unit_weights_ptr,
+    int lonely_psu_code,
     double *estimates_ptr,
     double *se_out,
     double *ci_lower_out,
@@ -913,6 +948,37 @@ extern int stata_bootstrap_trop_variance_joint_with_covariates(
     int n_covariates
 );
 
+/**
+ * Compute survey diagnostics: Kish DEFF and high-FPC stratum detection.
+ *
+ * Pure diagnostic function -- does not alter any computation.
+ * Call after a successful Rao-Wu bootstrap to obtain diagnostic scalars.
+ *
+ * @param strata_ptr         Stratum labels per unit (N values)
+ * @param psu_ptr            PSU labels per unit (N values)
+ * @param fpc_ptr            FPC values per unit (nullable; NULL = no FPC)
+ * @param unit_weights_ptr   Per-unit survey weights (N values)
+ * @param n_units            N
+ * @param deff_weights_out   [out] Kish design effect
+ * @param max_fh_out         [out] Maximum sampling fraction
+ * @param n_high_fpc_out     [out] Number of strata with f_h > 0.5
+ * @param high_fpc_fh_ptr    [out, nullable] f_h values for high-FPC strata
+ * @param high_fpc_max_elements  Max elements to write to high_fpc_fh_ptr
+ * @return 0 on success
+ */
+extern int stata_compute_survey_diagnostics(
+    const int64_t *strata_ptr,
+    const int64_t *psu_ptr,
+    const double *fpc_ptr,
+    const double *unit_weights_ptr,
+    int n_units,
+    double *deff_weights_out,
+    double *max_fh_out,
+    int *n_high_fpc_out,
+    double *high_fpc_fh_ptr,
+    int high_fpc_max_elements
+);
+
 #ifdef __cplusplus
 }
 #endif
@@ -1097,5 +1163,15 @@ ST_retcode write_matrix_to_stata(
     int nrows,
     int ncols
 );
+
+/**
+ * stata_get_last_condition_number
+ *
+ * Returns the condition number from the most recent SVD solve in the
+ * covariate WLS step.  Used to populate e(condition_number).
+ *
+ * @return Condition number (kappa), or NaN if no SVD has been performed.
+ */
+extern double stata_get_last_condition_number(void);
 
 #endif /* STATA_BRIDGE_H */

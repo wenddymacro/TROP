@@ -58,17 +58,17 @@ void trop_log(int level, const char *tag, const char *fmt, ...) {
 TropCommand parse_command(const char *cmd) {
     if (cmd == NULL) return CMD_UNKNOWN;
     
-    if (strcmp(cmd, "loocv_twostep") == 0) return CMD_LOOCV_TWOSTEP;
-    if (strcmp(cmd, "loocv_twostep_exhaustive") == 0) return CMD_LOOCV_TWOSTEP_EXHAUSTIVE;
-    if (strcmp(cmd, "loocv_joint") == 0) return CMD_LOOCV_JOINT;
-    if (strcmp(cmd, "loocv_joint_exhaustive") == 0) return CMD_LOOCV_JOINT_EXHAUSTIVE;
-    if (strcmp(cmd, "estimate_twostep") == 0) return CMD_ESTIMATE_TWOSTEP;
-    if (strcmp(cmd, "estimate_joint") == 0) return CMD_ESTIMATE_JOINT;
-    if (strcmp(cmd, "bootstrap_twostep") == 0) return CMD_BOOTSTRAP_TWOSTEP;
-    if (strcmp(cmd, "bootstrap_joint") == 0) return CMD_BOOTSTRAP_JOINT;
-    if (strcmp(cmd, "bootstrap_rao_wu_twostep") == 0) return CMD_BOOTSTRAP_RAO_WU_TWOSTEP;
-    if (strcmp(cmd, "bootstrap_rao_wu_joint") == 0) return CMD_BOOTSTRAP_RAO_WU_JOINT;
-    if (strcmp(cmd, "distance_matrix") == 0) return CMD_DISTANCE_MATRIX;
+    PARSE_CMD_ENTRY("loocv_twostep",           CMD_LOOCV_TWOSTEP)
+    PARSE_CMD_ENTRY("loocv_twostep_exhaustive", CMD_LOOCV_TWOSTEP_EXHAUSTIVE)
+    PARSE_CMD_ENTRY("loocv_joint",             CMD_LOOCV_JOINT)
+    PARSE_CMD_ENTRY("loocv_joint_exhaustive",   CMD_LOOCV_JOINT_EXHAUSTIVE)
+    PARSE_CMD_ENTRY("estimate_twostep",        CMD_ESTIMATE_TWOSTEP)
+    PARSE_CMD_ENTRY("estimate_joint",          CMD_ESTIMATE_JOINT)
+    PARSE_CMD_ENTRY("bootstrap_twostep",       CMD_BOOTSTRAP_TWOSTEP)
+    PARSE_CMD_ENTRY("bootstrap_joint",         CMD_BOOTSTRAP_JOINT)
+    PARSE_CMD_ENTRY("bootstrap_rao_wu_twostep", CMD_BOOTSTRAP_RAO_WU_TWOSTEP)
+    PARSE_CMD_ENTRY("bootstrap_rao_wu_joint",   CMD_BOOTSTRAP_RAO_WU_JOINT)
+    PARSE_CMD_ENTRY("distance_matrix",         CMD_DISTANCE_MATRIX)
     
     return CMD_UNKNOWN;
 }
@@ -77,51 +77,37 @@ TropCommand parse_command(const char *cmd) {
  * Error Code Translation
  * ============================================================================ */
 
-void translate_error_code(int rust_code) {
-    char msg[256];
-    
-    switch (rust_code) {
-        case TROP_SUCCESS:
-            return; /* No error */
-        case TROP_ERR_NULL_POINTER:
-            snprintf(msg, sizeof(msg), "internal error: null pointer\n");
-            break;
-        case TROP_ERR_INVALID_DIM:
-            snprintf(msg, sizeof(msg), "invalid matrix dimensions\n");
-            break;
-        case TROP_ERR_NO_CONTROL:
-            snprintf(msg, sizeof(msg), "no control observations found in data\n");
-            break;
-        case TROP_ERR_NO_TREATED:
-            snprintf(msg, sizeof(msg), "no treated observations found in data\n");
-            break;
-        case TROP_ERR_CONVERGENCE:
-            snprintf(msg, sizeof(msg), "algorithm did not converge\n");
-            break;
-        case TROP_ERR_SINGULAR:
-            snprintf(msg, sizeof(msg), "singular matrix encountered\n");
-            break;
-        case TROP_ERR_MEMORY:
-            snprintf(msg, sizeof(msg), "memory allocation failure\n");
-            break;
-        case TROP_ERR_RUST_PANIC:
-            snprintf(msg, sizeof(msg), "internal error in Rust library\n");
-            break;
-        case TROP_ERR_LOOCV_FAIL:
-            snprintf(msg, sizeof(msg), "LOOCV search failed\n");
-            break;
-        case TROP_ERR_BOOTSTRAP_FAIL:
-            snprintf(msg, sizeof(msg), "bootstrap estimation failed\n");
-            break;
-        case TROP_ERR_COMPUTATION:
-            snprintf(msg, sizeof(msg), "computation error\n");
-            break;
-        default:
-            snprintf(msg, sizeof(msg), "unknown error (code %d)\n", rust_code);
-            break;
+/**
+ * Return a human-readable error description for a core library error code.
+ * The returned string is statically allocated and must not be freed.
+ */
+static const char* get_error_message(int code) {
+    switch (code) {
+        case TROP_SUCCESS:            return "Success";
+        case TROP_ERR_NULL_POINTER:   return "Internal error: null pointer passed to core library";
+        case TROP_ERR_INVALID_DIM:    return "Invalid matrix dimensions (panel structure mismatch)";
+        case TROP_ERR_NO_CONTROL:     return "No control observations found in data";
+        case TROP_ERR_NO_TREATED:     return "No treated observations found in data";
+        case TROP_ERR_CONVERGENCE:    return "Estimation did not converge within maxiter";
+        case TROP_ERR_SINGULAR:       return "Matrix is singular or nearly singular (SVD failed)";
+        case TROP_ERR_MEMORY:         return "Memory allocation failed";
+        case TROP_ERR_RUST_PANIC:     return "Internal error in core library (panic)";
+        case TROP_ERR_LOOCV_FAIL:     return "LOOCV grid search failed (all grid points invalid)";
+        case TROP_ERR_BOOTSTRAP_FAIL: return "Bootstrap variance estimation failed";
+        case TROP_ERR_COMPUTATION:    return "Numerical computation error";
+        case TROP_ERR_INVALID_FPC:    return "Invalid FPC value (non-positive or < n_PSU in stratum)";
+        case TROP_ERR_SINGLETON_PSU:  return "Singleton PSU detected (use singleunit option)";
+        default:                      return "Unknown error";
     }
+}
+
+void translate_error_code(int rust_code) {
+    if (rust_code == TROP_SUCCESS) return;
     
-    SF_error(msg);
+    char msg[256];
+    snprintf(msg, sizeof(msg), "{err}TROP error %d: %s{txt}\n",
+             rust_code, get_error_message(rust_code));
+    SF_display(msg);
 }
 
 /* ============================================================================
@@ -255,6 +241,108 @@ ST_retcode read_panel_to_matrix(
         out_matrix[i * n_periods + t] = val;
     }
     
+    return TROP_SUCCESS;
+}
+
+/* ============================================================================
+ * Fused Panel Data Reading (Performance Optimization)
+ * ============================================================================
+ *
+ * read_panel_pair_to_matrices: Reads two panel variables (typically Y and D)
+ * in a single observation loop, eliminating redundant panel_idx and time_idx
+ * reads.  Reduces total SF_vdata calls from 6·nobs to 4·nobs (33% saving).
+ *
+ * Data content and ordering are bit-wise identical to calling
+ * read_panel_to_matrix twice sequentially.
+ */
+
+ST_retcode read_panel_pair_to_matrices(
+    ST_int varindex1,
+    ST_int varindex2,
+    ST_int n_periods,
+    ST_int n_units,
+    double *out_matrix1,
+    double *out_matrix2
+) {
+    ST_int obs, t, i, idx;
+    ST_int in1, in2;
+    double val1, val2;
+    ST_retcode rc;
+    ST_int total_cells = n_units * n_periods;
+
+    double panel_vidx_d, time_vidx_d;
+    ST_int panel_varindex, time_varindex;
+    double panel_val, time_val;
+
+    rc = SF_scal_use("__trop_panel_varindex", &panel_vidx_d);
+    if (rc != 0) {
+        TROP_LOG_ERROR("failed to read scalar __trop_panel_varindex");
+        return TROP_ERR_SCALAR_FAIL;
+    }
+    rc = SF_scal_use("__trop_time_varindex", &time_vidx_d);
+    if (rc != 0) {
+        TROP_LOG_ERROR("failed to read scalar __trop_time_varindex");
+        return TROP_ERR_SCALAR_FAIL;
+    }
+    panel_varindex = (ST_int)panel_vidx_d;
+    time_varindex = (ST_int)time_vidx_d;
+
+    in1 = SF_in1();
+    in2 = SF_in2();
+
+    TROP_LOG_DEBUG("read_panel_pair: var1=%d, var2=%d, panel_vi=%d, time_vi=%d, in1=%d, in2=%d",
+                   varindex1, varindex2, panel_varindex, time_varindex, in1, in2);
+
+    /* Initialize both matrices with NaN */
+    for (idx = 0; idx < total_cells; idx++) {
+        out_matrix1[idx] = NAN;
+        out_matrix2[idx] = NAN;
+    }
+
+    /* Single pass through observations: read panel/time once, then both values */
+    for (obs = in1; obs <= in2; obs++) {
+        if (!SF_ifobs(obs)) continue;
+
+        /* Read panel_idx and time_idx (shared across both variables) */
+        rc = SF_vdata(panel_varindex, obs, &panel_val);
+        if (rc != 0) {
+            TROP_LOG_ERROR("SF_vdata failed for panel_idx: obs=%d, rc=%d", obs, rc);
+            return rc;
+        }
+        rc = SF_vdata(time_varindex, obs, &time_val);
+        if (rc != 0) {
+            TROP_LOG_ERROR("SF_vdata failed for time_idx: obs=%d, rc=%d", obs, rc);
+            return rc;
+        }
+
+        i = (ST_int)panel_val - 1;
+        t = (ST_int)time_val - 1;
+
+        /* Bounds check — skip out-of-range observations */
+        if ((unsigned)i >= (unsigned)n_units || (unsigned)t >= (unsigned)n_periods)
+            continue;
+
+        /* Read both variable values in the same iteration */
+        rc = SF_vdata(varindex1, obs, &val1);
+        if (rc != 0) {
+            TROP_LOG_ERROR("SF_vdata failed: varindex=%d, obs=%d, rc=%d", varindex1, obs, rc);
+            return rc;
+        }
+        rc = SF_vdata(varindex2, obs, &val2);
+        if (rc != 0) {
+            TROP_LOG_ERROR("SF_vdata failed: varindex=%d, obs=%d, rc=%d", varindex2, obs, rc);
+            return rc;
+        }
+
+        val1 = stata_to_rust_value(val1);
+        val2 = stata_to_rust_value(val2);
+
+        /* Column-major storage: index = i * n_periods + t */
+        idx = i * n_periods + t;
+        out_matrix1[idx] = val1;
+        out_matrix2[idx] = val2;
+    }
+
     return TROP_SUCCESS;
 }
 
@@ -575,6 +663,14 @@ static ST_retcode handle_loocv_twostep(void) {
     stage1_nn = 0.0;
     
     TROP_LOG_INFO("starting LOOCV grid search (twostep)");
+
+    /* Progress feedback: display grid size before invoking the search */
+    if (g_verbose_level >= TROP_VERBOSE_NORMAL) {
+        char pbuf[256];
+        snprintf(pbuf, sizeof(pbuf),
+                 "{txt}  LOOCV (twostep, cycling): evaluating grid...\n");
+        SF_display(pbuf);
+    }
     
     /* Read dimensions */
     rc = read_dimensions(&n_units, &n_periods);
@@ -598,10 +694,7 @@ static ST_retcode handle_loocv_twostep(void) {
     SF_scal_use("__trop_d_varindex", &d_idx_d);
     SF_scal_use("__trop_ctrl_varindex", &ctrl_idx_d);
     
-    rc = read_panel_to_matrix((ST_int)y_idx_d, n_periods, n_units, y_matrix);
-    if (rc != TROP_SUCCESS) goto cleanup;
-    
-    rc = read_panel_to_matrix((ST_int)d_idx_d, n_periods, n_units, d_matrix);
+    rc = read_panel_pair_to_matrices((ST_int)y_idx_d, (ST_int)d_idx_d, n_periods, n_units, y_matrix, d_matrix);
     if (rc != TROP_SUCCESS) goto cleanup;
     
     rc = read_control_mask((ST_int)ctrl_idx_d, n_periods, n_units, control_mask);
@@ -654,6 +747,11 @@ static ST_retcode handle_loocv_twostep(void) {
                 for (row = 0; row < n_obs; row++) {
                     if (SF_mat_el("__trop_covariates", row + 1, col + 1, &val) != 0) {
                         val = 0.0;
+                    }
+                    if (val != val) { /* NaN check: IEEE 754 NaN != NaN */
+                        SF_error("covariate matrix contains missing values (internal error)\n");
+                        rc = 416;
+                        goto cleanup;
                     }
                     x_buf[row + col * n_obs] = val;
                 }
@@ -714,6 +812,14 @@ static ST_retcode handle_loocv_twostep(void) {
     TROP_LOG_INFO("LOOCV complete: lambda_time=%g, lambda_unit=%g, lambda_nn=%g, score=%g, n_valid=%d, n_attempted=%d, first_failed=(%d,%d), stage1=(%g,%g,%g)",
                   best_time, best_unit, best_nn, best_score, n_valid, n_attempted, first_failed_t, first_failed_i,
                   stage1_time, stage1_unit, stage1_nn);
+
+    /* Progress feedback: LOOCV twostep cycling complete */
+    if (g_verbose_level >= TROP_VERBOSE_NORMAL) {
+        char pbuf[256];
+        snprintf(pbuf, sizeof(pbuf),
+                 "{txt}  LOOCV (twostep) complete. Best score = %g\n", best_score);
+        SF_display(pbuf);
+    }
     
     rc = TROP_SUCCESS;
     
@@ -767,6 +873,11 @@ static ST_retcode handle_loocv_twostep_exhaustive(void) {
 
     TROP_LOG_INFO("starting LOOCV exhaustive grid search (twostep)");
 
+    /* Progress feedback */
+    if (g_verbose_level >= TROP_VERBOSE_NORMAL) {
+        SF_display("{txt}  LOOCV (twostep, exhaustive): evaluating grid...\n");
+    }
+
     /* Read dimensions */
     rc = read_dimensions(&n_units, &n_periods);
     if (rc != TROP_SUCCESS) goto cleanup;
@@ -789,10 +900,7 @@ static ST_retcode handle_loocv_twostep_exhaustive(void) {
     SF_scal_use("__trop_d_varindex", &d_idx_d);
     SF_scal_use("__trop_ctrl_varindex", &ctrl_idx_d);
 
-    rc = read_panel_to_matrix((ST_int)y_idx_d, n_periods, n_units, y_matrix);
-    if (rc != TROP_SUCCESS) goto cleanup;
-
-    rc = read_panel_to_matrix((ST_int)d_idx_d, n_periods, n_units, d_matrix);
+    rc = read_panel_pair_to_matrices((ST_int)y_idx_d, (ST_int)d_idx_d, n_periods, n_units, y_matrix, d_matrix);
     if (rc != TROP_SUCCESS) goto cleanup;
 
     rc = read_control_mask((ST_int)ctrl_idx_d, n_periods, n_units, control_mask);
@@ -845,6 +953,11 @@ static ST_retcode handle_loocv_twostep_exhaustive(void) {
                 for (row = 0; row < n_obs; row++) {
                     if (SF_mat_el("__trop_covariates", row + 1, col + 1, &val) != 0) {
                         val = 0.0;
+                    }
+                    if (val != val) { /* NaN check: IEEE 754 NaN != NaN */
+                        SF_error("covariate matrix contains missing values (internal error)\n");
+                        rc = 416;
+                        goto cleanup;
                     }
                     x_buf[row + col * n_obs] = val;
                 }
@@ -927,7 +1040,9 @@ static ST_retcode handle_loocv_joint(void) {
     double *lambda_time_grid = NULL;
     double *lambda_unit_grid = NULL;
     double *lambda_nn_grid = NULL;
+    double *x_buf = NULL;
     int lambda_time_len, lambda_unit_len, lambda_nn_len;
+    int n_covariates = 0;
     double max_iter_d, tol;
     int max_iter;
     double best_time, best_unit, best_nn, best_score;
@@ -944,6 +1059,11 @@ static ST_retcode handle_loocv_joint(void) {
     stage1_nn = 0.0;
     
     TROP_LOG_INFO("starting LOOCV cycling search (joint)");
+
+    /* Progress feedback */
+    if (g_verbose_level >= TROP_VERBOSE_NORMAL) {
+        SF_display("{txt}  LOOCV (joint, cycling): evaluating grid...\n");
+    }
     
     /* Read dimensions */
     rc = read_dimensions(&n_units, &n_periods);
@@ -966,10 +1086,7 @@ static ST_retcode handle_loocv_joint(void) {
     SF_scal_use("__trop_d_varindex", &d_idx_d);
     SF_scal_use("__trop_ctrl_varindex", &ctrl_idx_d);
     
-    rc = read_panel_to_matrix((ST_int)y_idx_d, n_periods, n_units, y_matrix);
-    if (rc != TROP_SUCCESS) goto cleanup;
-    
-    rc = read_panel_to_matrix((ST_int)d_idx_d, n_periods, n_units, d_matrix);
+    rc = read_panel_pair_to_matrices((ST_int)y_idx_d, (ST_int)d_idx_d, n_periods, n_units, y_matrix, d_matrix);
     if (rc != TROP_SUCCESS) goto cleanup;
     
     rc = read_control_mask((ST_int)ctrl_idx_d, n_periods, n_units, control_mask);
@@ -995,7 +1112,41 @@ static ST_retcode handle_loocv_joint(void) {
     SF_scal_use("__trop_tol", &tol);
     
     max_iter = (int)max_iter_d;
-    
+
+    /* --- Covariate support --- */
+    {
+        double nc_val = 0;
+        if (SF_scal_use("__trop_n_covariates", &nc_val) == 0 && nc_val > 0) {
+            n_covariates = (int)nc_val;
+        }
+    }
+    if (n_covariates > 0) {
+        int n_obs = (int)n_periods * (int)n_units;
+        x_buf = (double *)malloc((size_t)n_obs * (size_t)n_covariates * sizeof(double));
+        if (!x_buf) {
+            TROP_LOG_ERROR("covariate memory allocation failed");
+            rc = TROP_ERR_MEMORY;
+            goto cleanup;
+        }
+        {
+            int row, col;
+            double val;
+            for (col = 0; col < n_covariates; col++) {
+                for (row = 0; row < n_obs; row++) {
+                    if (SF_mat_el("__trop_covariates", row + 1, col + 1, &val) != 0) {
+                        val = 0.0;
+                    }
+                    if (val != val) { /* NaN check: IEEE 754 NaN != NaN */
+                        SF_error("covariate matrix contains missing values (internal error)\n");
+                        rc = 416;
+                        goto cleanup;
+                    }
+                    x_buf[row + col * n_obs] = val;
+                }
+            }
+        }
+    }
+
     /* Call Rust: two-stage coordinate descent over lambda grid.
      * max_cycles=10 controls the number of coordinate descent iterations. */
     rust_rc = stata_loocv_cycling_search_joint(
@@ -1009,7 +1160,8 @@ static ST_retcode handle_loocv_joint(void) {
         &best_time, &best_unit, &best_nn, &best_score,
         &n_valid, &n_attempted,
         &first_failed_t, &first_failed_i,
-        &stage1_time, &stage1_unit, &stage1_nn
+        &stage1_time, &stage1_unit, &stage1_nn,
+        x_buf, n_covariates
     );
     
     if (rust_rc != TROP_SUCCESS) {
@@ -1047,6 +1199,7 @@ cleanup:
     free(lambda_time_grid);
     free(lambda_unit_grid);
     free(lambda_nn_grid);
+    free(x_buf);
     
     return rc;
 }
@@ -1072,7 +1225,9 @@ static ST_retcode handle_loocv_joint_exhaustive(void) {
     double *lambda_time_grid = NULL;
     double *lambda_unit_grid = NULL;
     double *lambda_nn_grid = NULL;
+    double *x_buf = NULL;
     int lambda_time_len, lambda_unit_len, lambda_nn_len;
+    int n_covariates = 0;
     double max_iter_d, tol;
     int max_iter;
     double best_time, best_unit, best_nn, best_score;
@@ -1085,6 +1240,11 @@ static ST_retcode handle_loocv_joint_exhaustive(void) {
     first_failed_i = -1;
     
     TROP_LOG_INFO("starting LOOCV exhaustive grid search (joint)");
+
+    /* Progress feedback */
+    if (g_verbose_level >= TROP_VERBOSE_NORMAL) {
+        SF_display("{txt}  LOOCV (joint, exhaustive): evaluating grid...\n");
+    }
     
     /* Read dimensions */
     rc = read_dimensions(&n_units, &n_periods);
@@ -1107,10 +1267,7 @@ static ST_retcode handle_loocv_joint_exhaustive(void) {
     SF_scal_use("__trop_d_varindex", &d_idx_d);
     SF_scal_use("__trop_ctrl_varindex", &ctrl_idx_d);
     
-    rc = read_panel_to_matrix((ST_int)y_idx_d, n_periods, n_units, y_matrix);
-    if (rc != TROP_SUCCESS) goto cleanup;
-    
-    rc = read_panel_to_matrix((ST_int)d_idx_d, n_periods, n_units, d_matrix);
+    rc = read_panel_pair_to_matrices((ST_int)y_idx_d, (ST_int)d_idx_d, n_periods, n_units, y_matrix, d_matrix);
     if (rc != TROP_SUCCESS) goto cleanup;
     
     rc = read_control_mask((ST_int)ctrl_idx_d, n_periods, n_units, control_mask);
@@ -1136,6 +1293,40 @@ static ST_retcode handle_loocv_joint_exhaustive(void) {
     SF_scal_use("__trop_tol", &tol);
     
     max_iter = (int)max_iter_d;
+
+    /* --- Covariate support --- */
+    {
+        double nc_val = 0;
+        if (SF_scal_use("__trop_n_covariates", &nc_val) == 0 && nc_val > 0) {
+            n_covariates = (int)nc_val;
+        }
+    }
+    if (n_covariates > 0) {
+        int n_obs = (int)n_periods * (int)n_units;
+        x_buf = (double *)malloc((size_t)n_obs * (size_t)n_covariates * sizeof(double));
+        if (!x_buf) {
+            TROP_LOG_ERROR("covariate memory allocation failed");
+            rc = TROP_ERR_MEMORY;
+            goto cleanup;
+        }
+        {
+            int row, col;
+            double val;
+            for (col = 0; col < n_covariates; col++) {
+                for (row = 0; row < n_obs; row++) {
+                    if (SF_mat_el("__trop_covariates", row + 1, col + 1, &val) != 0) {
+                        val = 0.0;
+                    }
+                    if (val != val) { /* NaN check: IEEE 754 NaN != NaN */
+                        SF_error("covariate matrix contains missing values (internal error)\n");
+                        rc = 416;
+                        goto cleanup;
+                    }
+                    x_buf[row + col * n_obs] = val;
+                }
+            }
+        }
+    }
     
     /* Call Rust: exhaustive Cartesian search over the full grid. */
     rust_rc = stata_loocv_grid_search_joint(
@@ -1147,7 +1338,8 @@ static ST_retcode handle_loocv_joint_exhaustive(void) {
         max_iter, tol,
         &best_time, &best_unit, &best_nn, &best_score,
         &n_valid, &n_attempted,
-        &first_failed_t, &first_failed_i
+        &first_failed_t, &first_failed_i,
+        x_buf, n_covariates
     );
     
     if (rust_rc != TROP_SUCCESS) {
@@ -1178,6 +1370,7 @@ cleanup:
     free(lambda_time_grid);
     free(lambda_unit_grid);
     free(lambda_nn_grid);
+    free(x_buf);
     
     return rc;
 }
@@ -1215,6 +1408,11 @@ static ST_retcode handle_estimate_twostep(void) {
     int rust_rc;
     
     TROP_LOG_INFO("starting estimation (twostep)");
+
+    /* Progress feedback */
+    if (g_verbose_level >= TROP_VERBOSE_NORMAL) {
+        SF_display("{txt}  Estimation (twostep): fitting model...\n");
+    }
     
     /* Read dimensions */
     rc = read_dimensions(&n_units, &n_periods);
@@ -1249,10 +1447,7 @@ static ST_retcode handle_estimate_twostep(void) {
     SF_scal_use("__trop_d_varindex", &d_idx_d);
     SF_scal_use("__trop_ctrl_varindex", &ctrl_idx_d);
     
-    rc = read_panel_to_matrix((ST_int)y_idx_d, n_periods, n_units, y_matrix);
-    if (rc != TROP_SUCCESS) goto cleanup;
-    
-    rc = read_panel_to_matrix((ST_int)d_idx_d, n_periods, n_units, d_matrix);
+    rc = read_panel_pair_to_matrices((ST_int)y_idx_d, (ST_int)d_idx_d, n_periods, n_units, y_matrix, d_matrix);
     if (rc != TROP_SUCCESS) goto cleanup;
     
     rc = read_control_mask((ST_int)ctrl_idx_d, n_periods, n_units, control_mask);
@@ -1313,6 +1508,11 @@ static ST_retcode handle_estimate_twostep(void) {
                 for (row = 0; row < n_obs; row++) {
                     if (SF_mat_el("__trop_covariates", row + 1, col + 1, &val) != 0) {
                         val = 0.0;
+                    }
+                    if (val != val) { /* NaN check: IEEE 754 NaN != NaN */
+                        SF_error("covariate matrix contains missing values (internal error)\n");
+                        rc = 416;
+                        goto cleanup;
                     }
                     x_buf[row + col * n_obs] = val;
                 }
@@ -1434,6 +1634,14 @@ static ST_retcode handle_estimate_twostep(void) {
         for (j = 0; j < n_covariates; j++) {
             SF_mat_store("__trop_gamma", 1, j + 1, gamma_buf[j]);
         }
+        /* Store the condition number from the last covariate SVD solve.
+         * Only meaningful when covariates are present (otherwise NaN). */
+        {
+            double cond_num = stata_get_last_condition_number();
+            if (!isnan(cond_num) && cond_num > 0.0) {
+                SF_scal_save("__trop_condition_number", cond_num);
+            }
+        }
     }
     
     TROP_LOG_INFO("estimation complete: ATT=%g, n_treated=%d, converged=%d",
@@ -1541,6 +1749,11 @@ static ST_retcode handle_estimate_joint(void) {
     int rust_rc;
     
     TROP_LOG_INFO("starting estimation (joint)");
+
+    /* Progress feedback */
+    if (g_verbose_level >= TROP_VERBOSE_NORMAL) {
+        SF_display("{txt}  Estimation (joint): fitting model...\n");
+    }
     
     /* Read dimensions */
     rc = read_dimensions(&n_units, &n_periods);
@@ -1566,10 +1779,7 @@ static ST_retcode handle_estimate_joint(void) {
     SF_scal_use("__trop_y_varindex", &y_idx_d);
     SF_scal_use("__trop_d_varindex", &d_idx_d);
     
-    rc = read_panel_to_matrix((ST_int)y_idx_d, n_periods, n_units, y_matrix);
-    if (rc != TROP_SUCCESS) goto cleanup;
-    
-    rc = read_panel_to_matrix((ST_int)d_idx_d, n_periods, n_units, d_matrix);
+    rc = read_panel_pair_to_matrices((ST_int)y_idx_d, (ST_int)d_idx_d, n_periods, n_units, y_matrix, d_matrix);
     if (rc != TROP_SUCCESS) goto cleanup;
     
     /* Read lambda parameters */
@@ -1619,6 +1829,11 @@ static ST_retcode handle_estimate_joint(void) {
                 for (row = 0; row < n_obs; row++) {
                     if (SF_mat_el("__trop_covariates", row + 1, col + 1, &val) != 0) {
                         val = 0.0;
+                    }
+                    if (val != val) { /* NaN check: IEEE 754 NaN != NaN */
+                        SF_error("covariate matrix contains missing values (internal error)\n");
+                        rc = 416;
+                        goto cleanup;
                     }
                     x_buf[row + col * n_obs] = val;
                 }
@@ -1730,6 +1945,13 @@ static ST_retcode handle_estimate_joint(void) {
         for (j = 0; j < n_covariates; j++) {
             SF_mat_store("__trop_gamma", 1, j + 1, gamma_buf[j]);
         }
+        /* Store the condition number from the last covariate SVD solve. */
+        {
+            double cond_num = stata_get_last_condition_number();
+            if (!isnan(cond_num) && cond_num > 0.0) {
+                SF_scal_save("__trop_condition_number", cond_num);
+            }
+        }
     }
     
     TROP_LOG_INFO("estimation complete: tau=%g, mu=%g, converged=%d",
@@ -1781,6 +2003,8 @@ cleanup:
     free(l_matrix);
     free(tau_vec);
     free(unit_weights);
+    free(x_buf);
+    free(gamma_buf);
     
     return rc;
 }
@@ -1814,6 +2038,11 @@ static ST_retcode handle_bootstrap_twostep(void) {
     int rust_rc;
     
     TROP_LOG_INFO("starting bootstrap variance estimation (twostep)");
+
+    /* Progress feedback */
+    if (g_verbose_level >= TROP_VERBOSE_NORMAL) {
+        SF_display("{txt}  Bootstrap (twostep): resampling...\n");
+    }
     
     /* Read dimensions */
     rc = read_dimensions(&n_units, &n_periods);
@@ -1858,10 +2087,7 @@ static ST_retcode handle_bootstrap_twostep(void) {
     SF_scal_use("__trop_d_varindex", &d_idx_d);
     SF_scal_use("__trop_ctrl_varindex", &ctrl_idx_d);
     
-    rc = read_panel_to_matrix((ST_int)y_idx_d, n_periods, n_units, y_matrix);
-    if (rc != TROP_SUCCESS) goto cleanup;
-    
-    rc = read_panel_to_matrix((ST_int)d_idx_d, n_periods, n_units, d_matrix);
+    rc = read_panel_pair_to_matrices((ST_int)y_idx_d, (ST_int)d_idx_d, n_periods, n_units, y_matrix, d_matrix);
     if (rc != TROP_SUCCESS) goto cleanup;
     
     rc = read_control_mask((ST_int)ctrl_idx_d, n_periods, n_units, control_mask);
@@ -1921,6 +2147,11 @@ static ST_retcode handle_bootstrap_twostep(void) {
                 for (row = 0; row < n_obs; row++) {
                     if (SF_mat_el("__trop_covariates", row + 1, col + 1, &val) != 0) {
                         val = 0.0;
+                    }
+                    if (val != val) { /* NaN check: IEEE 754 NaN != NaN */
+                        SF_error("covariate matrix contains missing values (internal error)\n");
+                        rc = 416;
+                        goto cleanup;
                     }
                     x_buf[row + col * n_obs] = val;
                 }
@@ -2031,6 +2262,11 @@ static ST_retcode handle_bootstrap_joint(void) {
     int rust_rc;
     
     TROP_LOG_INFO("starting bootstrap variance estimation (joint)");
+
+    /* Progress feedback */
+    if (g_verbose_level >= TROP_VERBOSE_NORMAL) {
+        SF_display("{txt}  Bootstrap (joint): resampling...\n");
+    }
     
     /* Read dimensions */
     rc = read_dimensions(&n_units, &n_periods);
@@ -2072,10 +2308,7 @@ static ST_retcode handle_bootstrap_joint(void) {
     SF_scal_use("__trop_y_varindex", &y_idx_d);
     SF_scal_use("__trop_d_varindex", &d_idx_d);
     
-    rc = read_panel_to_matrix((ST_int)y_idx_d, n_periods, n_units, y_matrix);
-    if (rc != TROP_SUCCESS) goto cleanup;
-    
-    rc = read_panel_to_matrix((ST_int)d_idx_d, n_periods, n_units, d_matrix);
+    rc = read_panel_pair_to_matrices((ST_int)y_idx_d, (ST_int)d_idx_d, n_periods, n_units, y_matrix, d_matrix);
     if (rc != TROP_SUCCESS) goto cleanup;
     
     /* Read parameters */
@@ -2129,6 +2362,11 @@ static ST_retcode handle_bootstrap_joint(void) {
                 for (row = 0; row < n_obs; row++) {
                     if (SF_mat_el("__trop_covariates", row + 1, col + 1, &val) != 0) {
                         val = 0.0;
+                    }
+                    if (val != val) { /* NaN check: IEEE 754 NaN != NaN */
+                        SF_error("covariate matrix contains missing values (internal error)\n");
+                        rc = 416;
+                        goto cleanup;
                     }
                     x_buf[row + col * n_obs] = val;
                 }
@@ -2238,6 +2476,11 @@ static ST_retcode handle_bootstrap_rao_wu_twostep(void) {
     int rust_rc;
     
     TROP_LOG_INFO("starting Rao-Wu bootstrap variance estimation (twostep)");
+
+    /* Progress feedback */
+    if (g_verbose_level >= TROP_VERBOSE_NORMAL) {
+        SF_display("{txt}  Rao-Wu Bootstrap (twostep): resampling...\n");
+    }
     
     /* Read dimensions */
     rc = read_dimensions(&n_units, &n_periods);
@@ -2278,10 +2521,7 @@ static ST_retcode handle_bootstrap_rao_wu_twostep(void) {
     SF_scal_use("__trop_d_varindex", &d_idx_d);
     SF_scal_use("__trop_ctrl_varindex", &ctrl_idx_d);
     
-    rc = read_panel_to_matrix((ST_int)y_idx_d, n_periods, n_units, y_matrix);
-    if (rc != TROP_SUCCESS) goto cleanup_rw_ts;
-    
-    rc = read_panel_to_matrix((ST_int)d_idx_d, n_periods, n_units, d_matrix);
+    rc = read_panel_pair_to_matrices((ST_int)y_idx_d, (ST_int)d_idx_d, n_periods, n_units, y_matrix, d_matrix);
     if (rc != TROP_SUCCESS) goto cleanup_rw_ts;
     
     rc = read_control_mask((ST_int)ctrl_idx_d, n_periods, n_units, control_mask);
@@ -2357,6 +2597,11 @@ static ST_retcode handle_bootstrap_rao_wu_twostep(void) {
     TROP_LOG_DEBUG("rao_wu_twostep params: n_bootstrap=%d, seed=%llu, alpha=%g",
                    n_bootstrap, (unsigned long long)seed, alpha);
 
+    /* Read lonely PSU strategy: 0=skip (default), 1=centered, 2=fail */
+    double lonely_psu_d = 0.0;
+    SF_scal_use("__trop_lonely_psu", &lonely_psu_d);
+    int lonely_psu_code = (int)lonely_psu_d;
+
     /* Call Rust Rao-Wu bootstrap */
     rust_rc = stata_bootstrap_trop_variance_rao_wu(
         y_matrix, d_matrix, control_mask, time_dist,
@@ -2364,6 +2609,7 @@ static ST_retcode handle_bootstrap_rao_wu_twostep(void) {
         lambda_time, lambda_unit, lambda_nn,
         n_bootstrap, max_iter, tol, seed, alpha, ddof,
         strata, psu, fpc, unit_weights,
+        lonely_psu_code,
         estimates, &se, &ci_lower_pct, &ci_upper_pct, &n_valid
     );
     
@@ -2395,6 +2641,22 @@ static ST_retcode handle_bootstrap_rao_wu_twostep(void) {
     TROP_LOG_INFO("Rao-Wu bootstrap (twostep) complete: SE=%g, n_valid=%d/%d",
                   se, n_valid, n_bootstrap);
     
+    /* Compute survey diagnostics (DEFF + high-FPC detection) */
+    {
+        double deff_w = 0.0, max_fh = 0.0;
+        int n_high_fpc = 0;
+        double high_fpc_fh[32]; /* up to 32 high-FPC strata */
+        int diag_rc = stata_compute_survey_diagnostics(
+            strata, psu, fpc, unit_weights, n_units,
+            &deff_w, &max_fh, &n_high_fpc, high_fpc_fh, 32
+        );
+        if (diag_rc == TROP_SUCCESS) {
+            SF_scal_save("__trop_deff_weights", deff_w);
+            SF_scal_save("__trop_max_fh", max_fh);
+            SF_scal_save("__trop_n_high_fpc", (double)n_high_fpc);
+        }
+    }
+
     rc = TROP_SUCCESS;
     
 cleanup_rw_ts:
@@ -2436,6 +2698,11 @@ static ST_retcode handle_bootstrap_rao_wu_joint(void) {
     int rust_rc;
     
     TROP_LOG_INFO("starting Rao-Wu bootstrap variance estimation (joint)");
+
+    /* Progress feedback */
+    if (g_verbose_level >= TROP_VERBOSE_NORMAL) {
+        SF_display("{txt}  Rao-Wu Bootstrap (joint): resampling...\n");
+    }
     
     /* Read dimensions */
     rc = read_dimensions(&n_units, &n_periods);
@@ -2473,10 +2740,7 @@ static ST_retcode handle_bootstrap_rao_wu_joint(void) {
     SF_scal_use("__trop_y_varindex", &y_idx_d);
     SF_scal_use("__trop_d_varindex", &d_idx_d);
     
-    rc = read_panel_to_matrix((ST_int)y_idx_d, n_periods, n_units, y_matrix);
-    if (rc != TROP_SUCCESS) goto cleanup_rw_jt;
-    
-    rc = read_panel_to_matrix((ST_int)d_idx_d, n_periods, n_units, d_matrix);
+    rc = read_panel_pair_to_matrices((ST_int)y_idx_d, (ST_int)d_idx_d, n_periods, n_units, y_matrix, d_matrix);
     if (rc != TROP_SUCCESS) goto cleanup_rw_jt;
     
     /* Read parameters */
@@ -2546,6 +2810,11 @@ static ST_retcode handle_bootstrap_rao_wu_joint(void) {
     TROP_LOG_DEBUG("rao_wu_joint params: n_bootstrap=%d, seed=%llu, alpha=%g",
                    n_bootstrap, (unsigned long long)seed, alpha);
 
+    /* Read lonely PSU strategy: 0=skip (default), 1=centered, 2=fail */
+    double lonely_psu_d = 0.0;
+    SF_scal_use("__trop_lonely_psu", &lonely_psu_d);
+    int lonely_psu_code = (int)lonely_psu_d;
+
     /* Call Rust Rao-Wu bootstrap (joint) */
     rust_rc = stata_bootstrap_trop_variance_rao_wu_joint(
         y_matrix, d_matrix,
@@ -2553,6 +2822,7 @@ static ST_retcode handle_bootstrap_rao_wu_joint(void) {
         lambda_time, lambda_unit, lambda_nn,
         n_bootstrap, max_iter, tol, seed, alpha, ddof,
         strata, psu, fpc, unit_weights,
+        lonely_psu_code,
         estimates, &se, &ci_lower_pct, &ci_upper_pct, &n_valid
     );
     
@@ -2584,6 +2854,22 @@ static ST_retcode handle_bootstrap_rao_wu_joint(void) {
     TROP_LOG_INFO("Rao-Wu bootstrap (joint) complete: SE=%g, n_valid=%d/%d",
                   se, n_valid, n_bootstrap);
     
+    /* Compute survey diagnostics (DEFF + high-FPC detection) */
+    {
+        double deff_w = 0.0, max_fh = 0.0;
+        int n_high_fpc = 0;
+        double high_fpc_fh[32];
+        int diag_rc = stata_compute_survey_diagnostics(
+            strata, psu, fpc, unit_weights, n_units,
+            &deff_w, &max_fh, &n_high_fpc, high_fpc_fh, 32
+        );
+        if (diag_rc == TROP_SUCCESS) {
+            SF_scal_save("__trop_deff_weights", deff_w);
+            SF_scal_save("__trop_max_fh", max_fh);
+            SF_scal_save("__trop_n_high_fpc", (double)n_high_fpc);
+        }
+    }
+
     rc = TROP_SUCCESS;
     
 cleanup_rw_jt:
@@ -2632,10 +2918,7 @@ static ST_retcode handle_distance_matrix(void) {
     SF_scal_use("__trop_y_varindex", &y_idx_d);
     SF_scal_use("__trop_d_varindex", &d_idx_d);
     
-    rc = read_panel_to_matrix((ST_int)y_idx_d, n_periods, n_units, y_matrix);
-    if (rc != TROP_SUCCESS) goto cleanup;
-    
-    rc = read_panel_to_matrix((ST_int)d_idx_d, n_periods, n_units, d_matrix);
+    rc = read_panel_pair_to_matrices((ST_int)y_idx_d, (ST_int)d_idx_d, n_periods, n_units, y_matrix, d_matrix);
     if (rc != TROP_SUCCESS) goto cleanup;
     
     /* Call Rust function */
@@ -2669,6 +2952,13 @@ cleanup:
 
 /* ============================================================================
  * Initialize Verbose Level
+ *
+ * Reads __trop_verbose scalar from Stata and clamps to [0, 4]:
+ *   0 = QUIET    (errors only)
+ *   1 = NORMAL   (progress milestones; default)
+ *   2 = DETAILED (per-stage summaries)
+ *   3 = DEBUG    (internal dispatch traces)
+ *   4 = DEV      (developer-only: raw buffers)
  * ============================================================================ */
 
 static void init_verbose_level(void) {
@@ -2677,7 +2967,10 @@ static void init_verbose_level(void) {
     
     rc = SF_scal_use("__trop_verbose", &verbose_d);
     if (rc == 0) {
-        g_verbose_level = (int)verbose_d;
+        int level = (int)verbose_d;
+        if (level < TROP_VERBOSE_QUIET) level = TROP_VERBOSE_QUIET;
+        if (level > TROP_VERBOSE_DEV) level = TROP_VERBOSE_DEV;
+        g_verbose_level = level;
     } else {
         g_verbose_level = TROP_VERBOSE_NORMAL;
     }
@@ -2707,50 +3000,18 @@ STDLL stata_call(int argc, char *argv[]) {
     
     /* Dispatch to handler */
     switch (cmd) {
-        case CMD_LOOCV_TWOSTEP:
-            rc = handle_loocv_twostep();
-            break;
+        DISPATCH_CMD_CASE(CMD_LOOCV_TWOSTEP,           handle_loocv_twostep)
+        DISPATCH_CMD_CASE(CMD_LOOCV_TWOSTEP_EXHAUSTIVE, handle_loocv_twostep_exhaustive)
+        DISPATCH_CMD_CASE(CMD_LOOCV_JOINT,             handle_loocv_joint)
+        DISPATCH_CMD_CASE(CMD_LOOCV_JOINT_EXHAUSTIVE,   handle_loocv_joint_exhaustive)
+        DISPATCH_CMD_CASE(CMD_ESTIMATE_TWOSTEP,        handle_estimate_twostep)
+        DISPATCH_CMD_CASE(CMD_ESTIMATE_JOINT,          handle_estimate_joint)
+        DISPATCH_CMD_CASE(CMD_BOOTSTRAP_TWOSTEP,       handle_bootstrap_twostep)
+        DISPATCH_CMD_CASE(CMD_BOOTSTRAP_JOINT,         handle_bootstrap_joint)
+        DISPATCH_CMD_CASE(CMD_BOOTSTRAP_RAO_WU_TWOSTEP, handle_bootstrap_rao_wu_twostep)
+        DISPATCH_CMD_CASE(CMD_BOOTSTRAP_RAO_WU_JOINT,   handle_bootstrap_rao_wu_joint)
+        DISPATCH_CMD_CASE(CMD_DISTANCE_MATRIX,         handle_distance_matrix)
 
-        case CMD_LOOCV_TWOSTEP_EXHAUSTIVE:
-            rc = handle_loocv_twostep_exhaustive();
-            break;
-
-        case CMD_LOOCV_JOINT:
-            rc = handle_loocv_joint();
-            break;
-            
-        case CMD_LOOCV_JOINT_EXHAUSTIVE:
-            rc = handle_loocv_joint_exhaustive();
-            break;
-            
-        case CMD_ESTIMATE_TWOSTEP:
-            rc = handle_estimate_twostep();
-            break;
-            
-        case CMD_ESTIMATE_JOINT:
-            rc = handle_estimate_joint();
-            break;
-            
-        case CMD_BOOTSTRAP_TWOSTEP:
-            rc = handle_bootstrap_twostep();
-            break;
-            
-        case CMD_BOOTSTRAP_JOINT:
-            rc = handle_bootstrap_joint();
-            break;
-            
-        case CMD_BOOTSTRAP_RAO_WU_TWOSTEP:
-            rc = handle_bootstrap_rao_wu_twostep();
-            break;
-            
-        case CMD_BOOTSTRAP_RAO_WU_JOINT:
-            rc = handle_bootstrap_rao_wu_joint();
-            break;
-            
-        case CMD_DISTANCE_MATRIX:
-            rc = handle_distance_matrix();
-            break;
-            
         case CMD_UNKNOWN:
         default:
             SF_error("trop: unknown command '");

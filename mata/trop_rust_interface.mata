@@ -715,6 +715,7 @@ real scalar _trop_main(
     real scalar lambda_time, lambda_unit, lambda_nn
     real scalar max_iter, tol, seed, alpha_level, ddof_eff
     real scalar has_survey
+    real scalar n_cov
     string scalar joint_mode, twostep_mode
 
     /* ── plugin check ────────────────────────────────────────────────── */
@@ -723,8 +724,56 @@ real scalar _trop_main(
         return(198)
     }
 
+    /* ── covariate guard ─────────────────────────────────────────────
+       Ensure __trop_n_covariates is always defined before any plugin
+       call.  trop_prepare_covariates() sets this when covariates are
+       present; when it was never called (no covariates), default to 0
+       so the C bridge reads a deterministic scalar. */
+    {
+        real matrix _tmp_ncov
+        _tmp_ncov = st_numscalar("__trop_n_covariates")
+        if (rows(_tmp_ncov) == 0) {
+            st_numscalar("__trop_n_covariates", 0)
+        }
+    }
+
     /* ── LOOCV ───────────────────────────────────────────────────────── */
     if (do_loocv) {
+        /* Progress reporting: display grid size before LOOCV starts */
+        real scalar _loocv_verbose, _n_lt, _n_lu, _n_ln, _n_grid_total
+        string scalar _loocv_mode_str
+        _loocv_verbose = st_numscalar("__trop_verbose")
+        if (_loocv_verbose >= .) _loocv_verbose = 0
+        if (_loocv_verbose) {
+            _n_lt = st_numscalar("__trop_n_lambda_time")
+            _n_lu = st_numscalar("__trop_n_lambda_unit")
+            _n_ln = st_numscalar("__trop_n_lambda_nn")
+            if (_n_lt >= . | _n_lt == 0) _n_lt = 1
+            if (_n_lu >= . | _n_lu == 0) _n_lu = 1
+            if (_n_ln >= . | _n_ln == 0) _n_ln = 1
+            _n_grid_total = _n_lt * _n_lu * _n_ln
+            if (method == "twostep") {
+                _loocv_mode_str = st_global("__trop_twostep_loocv_mode")
+            }
+            else {
+                _loocv_mode_str = st_global("__trop_joint_loocv_mode")
+            }
+            displayas("txt")
+            printf("{txt}\n")
+            if (_loocv_mode_str == "exhaustive") {
+                printf("{txt}LOOCV grid search (%g points, exhaustive):\n",
+                       _n_grid_total)
+            }
+            else {
+                printf("{txt}LOOCV grid search (%g+%g+%g = %g grid values, coordinate-descent):\n",
+                       _n_lt, _n_lu, _n_ln, _n_lt + _n_lu + _n_ln)
+            }
+            printf("{txt}  lambda_time: %g values, lambda_unit: %g values, lambda_nn: %g values\n",
+                   _n_lt, _n_lu, _n_ln)
+            printf("{txt}  Computing")
+            displayflush()
+        }
+
         if (method == "twostep") {
             /* twostep: dispatch on __trop_twostep_loocv_mode.
                "exhaustive" -> full Cartesian search (guaranteed global
@@ -743,6 +792,13 @@ real scalar _trop_main(
             if (joint_mode == "exhaustive") rc = trop_loocv_joint_exhaustive()
             else rc = trop_loocv_joint()
         }
+
+        /* Progress reporting: display completion */
+        if (_loocv_verbose) {
+            printf(" done\n")
+            displayflush()
+        }
+
         if (rc != 0) return(rc)
     }
 

@@ -13,13 +13,21 @@
 *      loocv        - LOOCV hyperparameter selection diagnostics
 *      factors      - Factor matrix (L) analysis
 *      triplerob    - Triple-robustness bias decomposition (paper Theorem 5.1)
+*      eventstudy   - Dynamic treatment effects by event-time horizon
+*      pretrend     - Pre-trend test (H0: all pre-treatment effects = 0)
+*      distance     - Unit distance distribution diagnostics
+*      mht          - Multiple hypothesis testing correction
+*      table        - Export results as LaTeX/Markdown/CSV/display table
 *
 *  Abbreviations:
-*      sum    -> summarize
-*      sens   -> sensitivity
-*      weight -> weights
-*      boot   -> bootstrap
-*      triple -> triplerob
+*      sum     -> summarize
+*      sens    -> sensitivity
+*      weight  -> weights
+*      boot    -> bootstrap
+*      triple  -> triplerob
+*      es      -> eventstudy
+*      pretest -> pretrend
+*      dist    -> distance
 
 program define trop_estat
     version 17
@@ -62,6 +70,21 @@ program define trop_estat
     else if "`subcmd'" == "triplerob" | "`subcmd'" == "triple" {
         trop_estat_triplerob `rest'
     }
+    else if "`subcmd'" == "eventstudy" | "`subcmd'" == "es" {
+        _trop_estat_eventstudy `rest'
+    }
+    else if "`subcmd'" == "pretrend" | "`subcmd'" == "pretest" {
+        _trop_estat_pretrend `rest'
+    }
+    else if "`subcmd'" == "distance" | "`subcmd'" == "dist" {
+        _trop_estat_distance `rest'
+    }
+    else if "`subcmd'" == "mht" {
+        _trop_estat_mht `rest'
+    }
+    else if "`subcmd'" == "table" {
+        _trop_estat_table `rest'
+    }
     else {
         di as error "estat subcommand '{bf:`subcmd'}' not recognized"
         di as error ""
@@ -74,6 +97,11 @@ program define trop_estat
         di as error "  {bf:loocv}       - LOOCV hyperparameter selection diagnostics"
         di as error "  {bf:factors}     - Factor matrix (L) SVD analysis"
         di as error "  {bf:triplerob}   - Triple-robustness bias decomposition (Theorem 5.1)"
+        di as error "  {bf:eventstudy}  - Dynamic treatment effects by event-time horizon"
+        di as error "  {bf:pretrend}    - Pre-trend test (H0: pre-treatment effects = 0)"
+        di as error "  {bf:distance}    - Unit distance distribution diagnostics"
+        di as error "  {bf:mht}         - Multiple hypothesis testing correction"
+        di as error "  {bf:table}       - Export results as formatted table"
         exit 199
     }
 end

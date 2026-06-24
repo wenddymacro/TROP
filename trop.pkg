@@ -2,7 +2,7 @@ v 3
 d TROP - Triply RObust Panel Estimator
 d Version: 1.2.0
 d Athey, Imbens, Qu & Viviano (2025)
-d Distribution-Date: 20260420
+d Distribution-Date: 20260622
 d License: AGPL-3.0
 d
 d === ADO Files ===
@@ -27,6 +27,12 @@ f ado/trop_estat_bootstrap.ado
 f ado/trop_estat_sensitivity.ado
 f ado/trop_estat_triplerob.ado
 f ado/trop_estat_vce.ado
+f ado/_trop_estat_distance.ado
+f ado/_trop_estat_mht.ado
+f ado/_trop_estat_eventstudy.ado
+f ado/_trop_estat_pretrend.ado
+f ado/_trop_estat_table.ado
+f ado/trop_predict_fitted.ado
 f ado/trop_predict_y0.ado
 f ado/trop_predict_y1.ado
 f ado/trop_predict_te.ado
@@ -58,6 +64,7 @@ f mata/trop_bootstrap_diagnostics.mata
 f mata/trop_estat_helpers.mata
 f mata/trop_lambda_grid.mata
 f mata/trop_main.mata
+f mata/trop_eventstudy.mata
 d
 d === Pre-compiled Plugins (all platforms) ===
 f ado/trop_macos_arm64.plugin
@@ -78,5 +85,7 @@ g data/germany_gdp.dta
 g data/basque_gdp.dta
 g data/smoking_packs.dta
 d
+d === Ancillary Files (install via: net get trop) ===
+g ancillary/10_trop_stata.ipynb
 d === Ancillary Files (install via: net get trop) ===
 g ancillary/10_trop_stata.ipynb

@@ -1,0 +1,21 @@
+To: kit.baum@bc.edu
+Subject: SSC submission: trop
+
+Package name: trop
+Title: Triple Robust Panel Estimator (TROP)
+Authors: Xuanyu Cai (City University of Macau), Wenli Xu (City University of Macau)
+Description: Implements the triply robust panel estimator of Athey, Imbens,
+  Qu & Viviano (2025) for estimating average treatment effects on the treated
+  (ATT) in panel data settings. Combines three estimation strategies (outcome
+  modeling via nuclear-norm regularization, propensity weighting, and
+  interactive fixed effects) to achieve triply-robust inference. Features
+  include leave-one-out cross-validation (LOOCV) for hyperparameter selection,
+  cluster bootstrap inference, event-study analysis, multiple hypothesis
+  testing correction, and comprehensive postestimation diagnostics.
+Required Stata version: 16.0 or later
+Required packages: none (self-contained with pre-compiled plugins for
+  macOS ARM64, macOS x64, Linux x64, and Windows x64)
+Keywords: panel data, causal inference, triple robustness, synthetic control,
+  difference-in-differences, LOOCV, interactive fixed effects, ATT,
+  treatment effects, nuclear norm
+Installation: net install trop, from(https://raw.githubusercontent.com/gorgeousfish/TROP/main/trop_stata)

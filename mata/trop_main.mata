@@ -59,6 +59,10 @@ mata set matastrict on
     weight_var_user    -- pweight variable name; empty disables pweights.
                           When set, per-unit pweights must be strictly
                           positive and constant within unit.
+    cov_varnames_user  -- row vector of covariate variable names; empty
+                          or omitted disables covariate adjustment.
+                          Covariates enter the model as X*gamma in the
+                          penalised regression (paper Section 4).
 
   Returns
     0 on success; nonzero Stata return code on failure.
@@ -82,7 +86,8 @@ real scalar trop_main(
     real scalar tol_user,
     real scalar alpha_level_user,
     real scalar ddof_user,
-    string scalar weight_var_user
+    string scalar weight_var_user,
+    string rowvector cov_varnames_user
 )
 {
     real scalar rc, do_loocv, do_bootstrap
@@ -92,6 +97,7 @@ real scalar trop_main(
     real scalar have_ddof
     real scalar has_survey, do_nest
     string scalar strata_var, psu_var, fpc_var
+    real scalar n_cov
     
     // Resolve optional parameters to effective values
     if (args() >= 14 & max_iter_user < . & max_iter_user > 0) max_iter_eff = max_iter_user
@@ -139,6 +145,29 @@ real scalar trop_main(
     
     // Record the touse variable so the plugin reads only in-sample rows
     st_global("__trop_touse_var", touse_var)
+
+    // Covariate preparation: extract covariate data and store as
+    // __trop_covariates matrix + __trop_n_covariates scalar.
+    // Must run before trop_prepare_output_matrices() which uses
+    // __trop_n_covariates to size the __trop_gamma pre-allocation.
+    n_cov = 0
+    if (args() >= 19 & cols(cov_varnames_user) > 0) {
+        if (cov_varnames_user[1] != "") {
+            rc = trop_prepare_covariates(cov_varnames_user,
+                    panel_idx_var, time_idx_var, touse_var,
+                    n_units, n_periods)
+            if (rc != 0) return(rc)
+            n_cov = cols(cov_varnames_user)
+            if (verbose) {
+                printf("{txt}Covariates: %g variable(s)\n", n_cov)
+            }
+        }
+    }
+    if (n_cov == 0) {
+        // Ensure the scalar exists even without covariates so the
+        // plugin always finds a defined __trop_n_covariates.
+        st_numscalar("__trop_n_covariates", 0)
+    }
 
     // Optional pweight: validate + write __trop_unit_weights / __trop_use_weights.
     // Default is 0 (disabled); the plugin only consults the weighted ABI
@@ -253,7 +282,13 @@ real scalar trop_main(
     )
     
     if (verbose) {
-        if (do_loocv) printf("{txt}LOOCV: enabled\n")
+        if (do_loocv) {
+            real scalar _total_grid_pts
+            _total_grid_pts = cols(lambda_time_grid) * cols(lambda_unit_grid) * cols(lambda_nn_grid)
+            printf("{txt}LOOCV: enabled (%g x %g x %g = %g grid points)\n",
+                   cols(lambda_time_grid), cols(lambda_unit_grid),
+                   cols(lambda_nn_grid), _total_grid_pts)
+        }
         else printf("{txt}LOOCV: disabled\n")
         if (do_bootstrap) printf("{txt}Bootstrap: enabled")
         else printf("{txt}Bootstrap: disabled")

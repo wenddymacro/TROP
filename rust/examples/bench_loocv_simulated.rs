@@ -77,7 +77,7 @@ fn main() {
         100,
         1e-6,
         None,
-    );
+    ).unwrap();
     let dt = t0.elapsed();
     println!(
         "  elapsed       : {:.2?}\n  best λ        : ({}, {}, {})\n  loocv_score   : {}\n  n_valid       : {}/{}",
@@ -97,6 +97,6 @@ fn main() {
         100,
         1e-6,
         None,
-    );
+    ).unwrap();
     println!("  elapsed       : {:.2?}  λ=({},{},{})  score={}", t0.elapsed(), r.0, r.1, r.2, r.3);
 }

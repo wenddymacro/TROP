@@ -29,11 +29,14 @@ use rand_xoshiro::Xoshiro256PlusPlus;
 use rayon::prelude::*;
 
 use crate::distance::UnitDistanceCache;
+use crate::error::{TropError, TropResult};
 use crate::estimation::{
-    debug_assert_delta_is_1minus_d_masked, estimate_model, solve_joint_no_lowrank,
-    solve_joint_with_lowrank,
+    debug_assert_delta_is_1minus_d_masked, estimate_model, estimate_model_into,
+    solve_joint_no_lowrank, solve_joint_with_lowrank,
 };
-use crate::weights::{compute_joint_weights, compute_weight_matrix_cached};
+use crate::weights::{
+    compute_joint_weights, compute_weight_matrix_cached, compute_weight_matrix_cached_into,
+};
 
 // ============================================================================
 // Unit Classification
@@ -203,6 +206,88 @@ pub fn build_bootstrap_matrices_with_mask(
     (y_boot, d_boot, control_mask_boot)
 }
 
+/// Pre-allocated version of [`build_bootstrap_matrices`].
+///
+/// Instead of allocating new matrices each call, writes into caller-provided
+/// buffers.  The buffers must have shape `(n_periods, max_units)` where
+/// `max_units >= sampled_units.len()`.  The caller should use only the first
+/// `sampled_units.len()` columns of each buffer after this call.
+///
+/// # Safety Invariant
+/// The entire buffer is zeroed at the start of each call to prevent data
+/// leakage from prior iterations (critical when `sampled_units.len()` varies).
+///
+/// # Returns
+/// The number of columns actually written (`sampled_units.len()`).
+pub fn build_bootstrap_matrices_into(
+    y_buf: &mut Array2<f64>,
+    d_buf: &mut Array2<f64>,
+    y: &Array2<f64>,
+    d: &Array2<f64>,
+    sampled_units: &[usize],
+) -> usize {
+    debug_assert_eq!(y_buf.nrows(), y.nrows());
+    debug_assert_eq!(d_buf.nrows(), d.nrows());
+    debug_assert!(y_buf.ncols() >= sampled_units.len());
+    debug_assert!(d_buf.ncols() >= sampled_units.len());
+
+    let n_periods = y.nrows();
+    let n_units = sampled_units.len();
+
+    // Safety: explicit full-buffer zeroing to prevent data leakage
+    y_buf.fill(0.0);
+    d_buf.fill(0.0);
+
+    for (new_idx, &old_idx) in sampled_units.iter().enumerate() {
+        for t in 0..n_periods {
+            y_buf[[t, new_idx]] = y[[t, old_idx]];
+            d_buf[[t, new_idx]] = d[[t, old_idx]];
+        }
+    }
+
+    n_units
+}
+
+/// Pre-allocated version of [`build_bootstrap_matrices_with_mask`].
+///
+/// Writes into caller-provided buffers including the control mask.
+/// All buffers are zeroed before filling to prevent cross-iteration leakage.
+///
+/// # Returns
+/// The number of columns actually written (`sampled_units.len()`).
+pub fn build_bootstrap_matrices_with_mask_into(
+    y_buf: &mut Array2<f64>,
+    d_buf: &mut Array2<f64>,
+    mask_buf: &mut Array2<u8>,
+    y: &Array2<f64>,
+    d: &Array2<f64>,
+    control_mask: &Array2<u8>,
+    sampled_units: &[usize],
+) -> usize {
+    debug_assert_eq!(y_buf.nrows(), y.nrows());
+    debug_assert_eq!(d_buf.nrows(), d.nrows());
+    debug_assert!(y_buf.ncols() >= sampled_units.len());
+    debug_assert!(d_buf.ncols() >= sampled_units.len());
+
+    let n_periods = y.nrows();
+    let n_units = sampled_units.len();
+
+    // Safety: explicit full-buffer zeroing to prevent data leakage
+    y_buf.fill(0.0);
+    d_buf.fill(0.0);
+    mask_buf.fill(0);
+
+    for (new_idx, &old_idx) in sampled_units.iter().enumerate() {
+        for t in 0..n_periods {
+            y_buf[[t, new_idx]] = y[[t, old_idx]];
+            d_buf[[t, new_idx]] = d[[t, old_idx]];
+            mask_buf[[t, new_idx]] = control_mask[[t, old_idx]];
+        }
+    }
+
+    n_units
+}
+
 // ============================================================================
 // Variance and CI Calculation
 // ============================================================================
@@ -257,7 +342,7 @@ fn aggregate_att(tau_cells: &[(f64, usize)], unit_weights: Option<&[f64]>) -> Op
 ///     standard convention for inferential bootstrap SEs.
 ///   - `0` ("population"): `1/B` — matches paper Algorithm 3's `V̂_τ`
 ///     exactly (population variance).
-/// Values `ddof ≥ 2` fall back to `ddof = 1`.
+///   - Values `ddof ≥ 2` fall back to `ddof = 1`.
 ///
 /// The two denominators differ by a factor `B/(B−1)`, negligible for the
 /// default `B = 200` (≈ 0.5 %) but visible for small `B` (≈ 2 % at B = 50).
@@ -413,8 +498,8 @@ pub struct BootstrapResult {
 /// * `alpha` - Significance level for the percentile CI.
 ///
 /// # Returns
+///
 /// `(estimates, se)` where `estimates` has length ≤ B.
-
 #[allow(clippy::too_many_arguments)]
 pub fn bootstrap_trop_variance(
     y: &ArrayView2<f64>,
@@ -577,17 +662,36 @@ pub fn bootstrap_trop_variance_full(
                 return None;
             }
 
-            // Build a per-iteration distance cache so the N_treated × N
-            // pairwise distance queries below amortise to O(1) each.
-            // The cache is shape-dependent on the resampled panel, so it
-            // must be rebuilt for every bootstrap draw.
+            // Build a per-iteration distance cache.  The cache is O(N·T) and
+            // shape-dependent on the resampled panel, so it is rebuilt per draw.
             let dist_cache = UnitDistanceCache::build(&y_boot.view(), &d_boot.view());
+
+            // Pre-allocate reusable buffers for the treated-observation loop.
+            let mut weight_buf = Array2::<f64>::zeros((n_periods, n_boot_units));
+            let mut alpha_buf = Array1::<f64>::zeros(n_boot_units);
+            let mut beta_buf = Array1::<f64>::zeros(n_periods);
+            let mut l_buf = Array2::<f64>::zeros((n_periods, n_boot_units));
+            let n_cov_boot = x_boot.as_ref().map_or(0, |xb| xb.ncols());
+            let mut gamma_buf = if n_cov_boot > 0 {
+                Some(Array1::<f64>::zeros(n_cov_boot))
+            } else {
+                None
+            };
 
             // Estimate τ(t,i) for each treated observation.
             let mut tau_values = Vec::with_capacity(boot_treated.len());
 
+            // Warm start: reuse previous observation's converged solution as
+            // initial values for the next.  Under a fixed lambda triplet the
+            // weight matrices (and thus optima) are similar across treated
+            // observations, so warm-starting reduces FISTA iterations.
+            let mut warm_alpha: Option<Array1<f64>> = None;
+            let mut warm_beta: Option<Array1<f64>> = None;
+            let mut warm_l: Option<Array2<f64>> = None;
+
             for (t, i) in boot_treated {
-                let weight_matrix = compute_weight_matrix_cached(
+                compute_weight_matrix_cached_into(
+                    &mut weight_buf,
                     &y_boot.view(),
                     &d_boot.view(),
                     &dist_cache,
@@ -600,24 +704,33 @@ pub fn bootstrap_trop_variance_full(
                     &time_dist_arr.view(),
                 );
 
+                let ws = match (&warm_alpha, &warm_beta, &warm_l) {
+                    (Some(a), Some(b), Some(l_prev)) => Some((a, b, l_prev)),
+                    _ => None,
+                };
+
                 let x_boot_view = x_boot.as_ref().map(|xb| xb.view());
-                if let Some((alpha_est, beta, l, _n_iters, _converged, result_gamma)) = estimate_model(
+                if let Some((_iters, _converged)) = estimate_model_into(
                     &y_boot.view(),
                     &control_mask_boot.view(),
-                    &weight_matrix.view(),
+                    &weight_buf.view(),
                     ln_eff,
                     n_periods,
                     n_boot_units,
                     max_iter,
                     tol,
                     None,
-                    None,
+                    ws,
                     x_boot_view.as_ref(),
                     None,
+                    &mut alpha_buf,
+                    &mut beta_buf,
+                    &mut l_buf,
+                    gamma_buf.as_mut(),
                 ) {
-                    let mut tau = y_boot[[t, i]] - alpha_est[i] - beta[t] - l[[t, i]];
+                    let mut tau = y_boot[[t, i]] - alpha_buf[i] - beta_buf[t] - l_buf[[t, i]];
                     if let Some(ref x_b) = x_boot {
-                        if let Some(ref g) = result_gamma {
+                        if let Some(ref g) = gamma_buf {
                             let idx = t * n_boot_units + i;
                             tau -= x_b.row(idx).dot(g);
                         }
@@ -625,6 +738,11 @@ pub fn bootstrap_trop_variance_full(
                     if tau.is_finite() {
                         tau_values.push(tau);
                     }
+
+                    // Stash converged solution for warm-starting the next observation.
+                    warm_alpha = Some(alpha_buf.clone());
+                    warm_beta = Some(beta_buf.clone());
+                    warm_l = Some(l_buf.clone());
                 }
             }
 
@@ -672,8 +790,8 @@ pub fn bootstrap_trop_variance_full(
 /// * `alpha` - Significance level for the percentile CI.
 ///
 /// # Returns
+///
 /// `(estimates, se)` where `estimates` has length ≤ B.
-
 #[allow(clippy::too_many_arguments)]
 pub fn bootstrap_trop_variance_joint(
     y: &ArrayView2<f64>,
@@ -1021,10 +1139,28 @@ pub fn bootstrap_trop_variance_full_weighted(
 
             let dist_cache = UnitDistanceCache::build(&y_boot.view(), &d_boot.view());
 
+            // Pre-allocate reusable buffers for the treated-observation loop.
+            let mut weight_buf = Array2::<f64>::zeros((n_periods, n_boot_units));
+            let mut alpha_buf = Array1::<f64>::zeros(n_boot_units);
+            let mut beta_buf = Array1::<f64>::zeros(n_periods);
+            let mut l_buf = Array2::<f64>::zeros((n_periods, n_boot_units));
+            let n_cov_boot = x_boot.as_ref().map_or(0, |xb| xb.ncols());
+            let mut gamma_buf = if n_cov_boot > 0 {
+                Some(Array1::<f64>::zeros(n_cov_boot))
+            } else {
+                None
+            };
+
             let mut tau_cells: Vec<(f64, usize)> = Vec::with_capacity(boot_treated.len());
 
+            // Warm start: reuse previous observation's converged solution.
+            let mut warm_alpha: Option<Array1<f64>> = None;
+            let mut warm_beta: Option<Array1<f64>> = None;
+            let mut warm_l: Option<Array2<f64>> = None;
+
             for (t, i) in boot_treated {
-                let weight_matrix = compute_weight_matrix_cached(
+                compute_weight_matrix_cached_into(
+                    &mut weight_buf,
                     &y_boot.view(),
                     &d_boot.view(),
                     &dist_cache,
@@ -1037,24 +1173,33 @@ pub fn bootstrap_trop_variance_full_weighted(
                     &time_dist_arr.view(),
                 );
 
+                let ws = match (&warm_alpha, &warm_beta, &warm_l) {
+                    (Some(a), Some(b), Some(l_prev)) => Some((a, b, l_prev)),
+                    _ => None,
+                };
+
                 let x_boot_view = x_boot.as_ref().map(|xb| xb.view());
-                if let Some((alpha_est, beta, l, _n_iters, _converged, result_gamma)) = estimate_model(
+                if let Some((_iters, _converged)) = estimate_model_into(
                     &y_boot.view(),
                     &control_mask_boot.view(),
-                    &weight_matrix.view(),
+                    &weight_buf.view(),
                     ln_eff,
                     n_periods,
                     n_boot_units,
                     max_iter,
                     tol,
                     None,
-                    None,
+                    ws,
                     x_boot_view.as_ref(),
                     None,
+                    &mut alpha_buf,
+                    &mut beta_buf,
+                    &mut l_buf,
+                    gamma_buf.as_mut(),
                 ) {
-                    let mut tau = y_boot[[t, i]] - alpha_est[i] - beta[t] - l[[t, i]];
+                    let mut tau = y_boot[[t, i]] - alpha_buf[i] - beta_buf[t] - l_buf[[t, i]];
                     if let Some(ref x_b) = x_boot {
-                        if let Some(ref g) = result_gamma {
+                        if let Some(ref g) = gamma_buf {
                             let idx = t * n_boot_units + i;
                             tau -= x_b.row(idx).dot(g);
                         }
@@ -1062,6 +1207,11 @@ pub fn bootstrap_trop_variance_full_weighted(
                     if tau.is_finite() {
                         tau_cells.push((tau, i));
                     }
+
+                    // Stash converged solution for warm-starting the next observation.
+                    warm_alpha = Some(alpha_buf.clone());
+                    warm_beta = Some(beta_buf.clone());
+                    warm_l = Some(l_buf.clone());
                 }
             }
 
@@ -1284,6 +1434,38 @@ pub fn bootstrap_trop_variance_joint_full_weighted(
 // Rao-Wu Bootstrap for Survey Designs
 // ============================================================================
 
+/// Strategy for handling singleton strata (lonely PSU) in Rao-Wu bootstrap.
+///
+/// When a stratum contains only one PSU (n_h=1), the within-stratum variance
+/// is undefined. This enum controls how such strata are treated.
+///
+/// Reference: Binder (1983), Rao & Wu (1988) — singleton PSU handling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LonelyPsuStrategy {
+    /// Skip singleton strata entirely (current default for backward compat).
+    /// Their PSUs retain their original weights without bootstrap rescaling.
+    Skip,
+    /// Center the singleton PSU score against the global PSU mean and
+    /// include its contribution in the bootstrap variance.
+    /// For Rao-Wu reweighting, this means the singleton PSU gets a
+    /// perturbation drawn relative to the global mean weight scale.
+    Centered,
+    /// Strict mode: return an error if any singleton stratum is encountered.
+    Fail,
+}
+
+impl LonelyPsuStrategy {
+    /// Parse from integer code passed via FFI.
+    /// 0 = Skip (default), 1 = Centered, 2 = Fail.
+    pub fn from_code(code: i32) -> Self {
+        match code {
+            1 => LonelyPsuStrategy::Centered,
+            2 => LonelyPsuStrategy::Fail,
+            _ => LonelyPsuStrategy::Skip,
+        }
+    }
+}
+
 /// Metadata for a single stratum in the Rao-Wu bootstrap scheme.
 #[derive(Debug, Clone)]
 struct StratumInfo {
@@ -1305,7 +1487,7 @@ fn build_strata_structure(
     strata: &[i64],
     psu: &[i64],
     fpc: Option<&[f64]>,
-) -> Vec<StratumInfo> {
+) -> TropResult<Vec<StratumInfo>> {
     use std::collections::BTreeMap;
 
     // stratum_label → { psu_label → [unit_indices] }
@@ -1328,7 +1510,7 @@ fn build_strata_structure(
         }
     }
 
-    strata_map
+    let groups: Vec<StratumInfo> = strata_map
         .into_iter()
         .map(|(s_label, psu_map)| {
             let psu_to_units: Vec<Vec<usize>> =
@@ -1341,7 +1523,24 @@ fn build_strata_structure(
                 psu_to_units,
             }
         })
-        .collect()
+        .collect();
+
+    // Validate FPC values for each stratum.
+    for stratum_info in &groups {
+        if let Some(fpc_val) = stratum_info.fpc {
+            let n_h = stratum_info.n_psu;
+            // FPC must be positive and finite.
+            if !fpc_val.is_finite() || fpc_val <= 0.0 {
+                return Err(TropError::InvalidFpc);
+            }
+            // FPC must be >= number of sampled PSUs in the stratum.
+            if (fpc_val as usize) < n_h {
+                return Err(TropError::InvalidFpc);
+            }
+        }
+    }
+
+    Ok(groups)
 }
 
 /// Rao-Wu (1988) bootstrap for twostep method with complex survey design.
@@ -1381,7 +1580,8 @@ pub fn bootstrap_trop_variance_rao_wu(
     fpc: Option<&[f64]>,
     unit_weights: &[f64],
     x: Option<&ArrayView2<f64>>,
-) -> BootstrapResult {
+    lonely_psu: LonelyPsuStrategy,
+) -> TropResult<BootstrapResult> {
     let n_periods = y.nrows();
     let n_units = y.ncols();
 
@@ -1404,7 +1604,7 @@ pub fn bootstrap_trop_variance_rao_wu(
     }
 
     if treated_obs.is_empty() {
-        return BootstrapResult {
+        return Ok(BootstrapResult {
             estimates: Vec::new(),
             se: 0.0,
             mean: 0.0,
@@ -1413,7 +1613,7 @@ pub fn bootstrap_trop_variance_rao_wu(
             n_valid: 0,
             n_total: n_bootstrap,
             level: 1.0 - alpha,
-        };
+        });
     }
 
     // Compute τ for each treated observation (single model fit).
@@ -1465,7 +1665,7 @@ pub fn bootstrap_trop_variance_rao_wu(
         .collect();
 
     if tau_cells.is_empty() {
-        return BootstrapResult {
+        return Ok(BootstrapResult {
             estimates: Vec::new(),
             se: 0.0,
             mean: 0.0,
@@ -1474,11 +1674,41 @@ pub fn bootstrap_trop_variance_rao_wu(
             n_valid: 0,
             n_total: n_bootstrap,
             level: 1.0 - alpha,
-        };
+        });
     }
 
     // ---- Phase 2: Rao-Wu reweighting (parallel B iterations) ----
-    let strata_groups = build_strata_structure(strata, psu, fpc);
+    let strata_groups = build_strata_structure(strata, psu, fpc)?;
+
+    // Pre-check: in Fail mode, reject if any singleton stratum exists.
+    if lonely_psu == LonelyPsuStrategy::Fail {
+        for si in &strata_groups {
+            if si.n_psu < 2 {
+                return Err(TropError::SingletonPsu);
+            }
+        }
+    }
+
+    // For Centered strategy, compute the global mean weight across all PSUs.
+    // This is used to "center" the singleton PSU's bootstrap weight perturbation.
+    // Equivalent to Python's _global_psu_mean approach adapted to weight domain:
+    // we compute mean(original_weight) over all PSUs across all strata.
+    let global_mean_weight: f64 = if lonely_psu == LonelyPsuStrategy::Centered {
+        let mut sum_w = 0.0_f64;
+        let mut n_all_psu = 0usize;
+        for si in &strata_groups {
+            for psu_units in &si.psu_to_units {
+                // PSU-level weight = sum of unit weights within this PSU
+                let psu_w: f64 = psu_units.iter().map(|&u| unit_weights[u]).sum();
+                sum_w += psu_w;
+                n_all_psu += 1;
+            }
+        }
+        if n_all_psu > 0 { sum_w / n_all_psu as f64 } else { 0.0 }
+    } else {
+        0.0
+    };
+
     let unit_weights_owned: Vec<f64> = unit_weights.to_vec();
     let tau_cells_ref = &tau_cells;
 
@@ -1492,7 +1722,44 @@ pub fn bootstrap_trop_variance_rao_wu(
             for stratum_info in &strata_groups {
                 let n_h = stratum_info.n_psu;
                 if n_h < 2 {
-                    continue; // lonely PSU: keep original weight
+                    // Singleton stratum handling
+                    match lonely_psu {
+                        LonelyPsuStrategy::Skip => continue,
+                        LonelyPsuStrategy::Centered => {
+                            // Centered strategy: perturb singleton PSU weight
+                            // relative to global mean.
+                            // Draw a single Poisson(1) count (0 or 1+) and scale.
+                            // With m_h=1, we draw 1 PSU from 1 available: count=1 always.
+                            // The centering effect comes from subtracting global mean.
+                            // Implementation: scale_factor = n_h/m_h = 1/1 = 1,
+                            // count = 1 always. But to introduce variability we use
+                            // a draw from Exponential(1) centered at 1.0, following
+                            // the Rao-Wu spirit.
+                            // Actually, for Rao-Wu with n_h=1: set m_h=1 (since
+                            // n_h-1=0 is invalid, use m_h=max(1, ...)=1).
+                            // Draw 1 PSU from {0}: count[0] = 1 always.
+                            // With the centered approach, the perturbation is:
+                            //   w_i*(b) = w_i + (w_i - w_global_mean) * epsilon
+                            // where epsilon ~ Uniform[-1, 1] for basic perturbation.
+                            // Following Binder's approach more precisely:
+                            //   The singleton PSU weight gets a random perturbation
+                            //   drawn so that E[w*] = w_original.
+                            // Simplest correct implementation: use a Rademacher
+                            // perturbation: w* = w + sign * (w - global_mean)
+                            let sign: f64 = if rng.gen_bool(0.5) { 1.0 } else { -1.0 };
+                            for &unit_idx in &stratum_info.psu_to_units[0] {
+                                let w_orig = unit_weights_owned[unit_idx];
+                                let centered_dev = w_orig - global_mean_weight;
+                                boot_weights[unit_idx] = w_orig + sign * centered_dev;
+                                // Ensure non-negative
+                                if boot_weights[unit_idx] < 0.0 {
+                                    boot_weights[unit_idx] = 0.0;
+                                }
+                            }
+                            continue;
+                        }
+                        LonelyPsuStrategy::Fail => unreachable!(),
+                    }
                 }
 
                 let m_h = if let Some(fpc_val) = stratum_info.fpc {
@@ -1546,7 +1813,7 @@ pub fn bootstrap_trop_variance_rao_wu(
     let (mean, _, se) = compute_bootstrap_variance(&bootstrap_estimates, ddof);
     let (ci_lower, ci_upper) = compute_percentile_ci(&bootstrap_estimates, alpha);
 
-    BootstrapResult {
+    Ok(BootstrapResult {
         estimates: bootstrap_estimates,
         se,
         mean,
@@ -1555,7 +1822,7 @@ pub fn bootstrap_trop_variance_rao_wu(
         n_valid,
         n_total: n_bootstrap,
         level: 1.0 - alpha,
-    }
+    })
 }
 
 /// Rao-Wu (1988) bootstrap for joint method with complex survey design.
@@ -1581,7 +1848,8 @@ pub fn bootstrap_trop_variance_rao_wu_joint(
     fpc: Option<&[f64]>,
     unit_weights: &[f64],
     x: Option<&ArrayView2<f64>>,
-) -> BootstrapResult {
+    lonely_psu: LonelyPsuStrategy,
+) -> TropResult<BootstrapResult> {
     let n_periods = y.nrows();
     let n_units = y.ncols();
 
@@ -1659,7 +1927,7 @@ pub fn bootstrap_trop_variance_rao_wu_joint(
     };
 
     if tau_cells.is_empty() {
-        return BootstrapResult {
+        return Ok(BootstrapResult {
             estimates: Vec::new(),
             se: 0.0,
             mean: 0.0,
@@ -1668,11 +1936,37 @@ pub fn bootstrap_trop_variance_rao_wu_joint(
             n_valid: 0,
             n_total: n_bootstrap,
             level: 1.0 - alpha,
-        };
+        });
     }
 
     // ---- Phase 2: Rao-Wu reweighting (parallel B iterations) ----
-    let strata_groups = build_strata_structure(strata, psu, fpc);
+    let strata_groups = build_strata_structure(strata, psu, fpc)?;
+
+    // Pre-check: in Fail mode, reject if any singleton stratum exists.
+    if lonely_psu == LonelyPsuStrategy::Fail {
+        for si in &strata_groups {
+            if si.n_psu < 2 {
+                return Err(TropError::SingletonPsu);
+            }
+        }
+    }
+
+    // Global mean weight for centered singleton handling.
+    let global_mean_weight: f64 = if lonely_psu == LonelyPsuStrategy::Centered {
+        let mut sum_w = 0.0_f64;
+        let mut n_all_psu = 0usize;
+        for si in &strata_groups {
+            for psu_units in &si.psu_to_units {
+                let psu_w: f64 = psu_units.iter().map(|&u| unit_weights[u]).sum();
+                sum_w += psu_w;
+                n_all_psu += 1;
+            }
+        }
+        if n_all_psu > 0 { sum_w / n_all_psu as f64 } else { 0.0 }
+    } else {
+        0.0
+    };
+
     let unit_weights_owned: Vec<f64> = unit_weights.to_vec();
     let tau_cells_ref = &tau_cells;
 
@@ -1686,7 +1980,19 @@ pub fn bootstrap_trop_variance_rao_wu_joint(
             for stratum_info in &strata_groups {
                 let n_h = stratum_info.n_psu;
                 if n_h < 2 {
-                    continue;
+                    match lonely_psu {
+                        LonelyPsuStrategy::Skip => continue,
+                        LonelyPsuStrategy::Centered => {
+                            let sign: f64 = if rng.gen_bool(0.5) { 1.0 } else { -1.0 };
+                            for &unit_idx in &stratum_info.psu_to_units[0] {
+                                let w_orig = unit_weights_owned[unit_idx];
+                                let centered_dev = w_orig - global_mean_weight;
+                                boot_weights[unit_idx] = (w_orig + sign * centered_dev).max(0.0);
+                            }
+                            continue;
+                        }
+                        LonelyPsuStrategy::Fail => unreachable!(),
+                    }
                 }
 
                 let m_h = if let Some(fpc_val) = stratum_info.fpc {
@@ -1737,7 +2043,7 @@ pub fn bootstrap_trop_variance_rao_wu_joint(
     let (mean, _, se) = compute_bootstrap_variance(&bootstrap_estimates, ddof);
     let (ci_lower, ci_upper) = compute_percentile_ci(&bootstrap_estimates, alpha);
 
-    BootstrapResult {
+    Ok(BootstrapResult {
         estimates: bootstrap_estimates,
         se,
         mean,
@@ -1746,7 +2052,184 @@ pub fn bootstrap_trop_variance_rao_wu_joint(
         n_valid,
         n_total: n_bootstrap,
         level: 1.0 - alpha,
+    })
+}
+
+// ============================================================================
+// Survey Diagnostics (P2)
+// ============================================================================
+
+/// Diagnostic information for a single stratum with high sampling fraction.
+#[derive(Debug, Clone)]
+pub struct HighFpcStratum {
+    /// 1-based stratum index (order in which strata appear).
+    pub stratum_index: usize,
+    /// Sampling fraction f_h = n_h / N_h.
+    pub f_h: f64,
+    /// Number of sampled PSUs in this stratum.
+    pub n_h: usize,
+    /// Finite population size N_h for this stratum.
+    pub big_n_h: f64,
+}
+
+/// Aggregated survey diagnostics returned by [`compute_survey_diagnostics`].
+#[derive(Debug, Clone)]
+pub struct SurveyDiagnostics {
+    /// Kish (1965) design effect due to unequal weighting.
+    /// deff_w = n * sum(w_i^2) / (sum(w_i))^2.
+    /// Returns NaN if weights are all zero or degenerate.
+    pub deff_weights: f64,
+    /// Strata where f_h > 0.5 (high sampling fraction, strong FPC).
+    pub high_fpc_strata: Vec<HighFpcStratum>,
+    /// Maximum sampling fraction across all strata (NaN if no FPC).
+    pub max_fh: f64,
+    /// Number of strata with f_h > 0.5.
+    pub n_high_fpc: usize,
+}
+
+/// Compute survey diagnostics: weights DEFF and high-FPC detection.
+///
+/// This is a pure diagnostic function — it does not alter any computation.
+///
+/// # Arguments
+/// * `strata` - Stratum labels per unit (length N).
+/// * `psu` - PSU labels per unit (length N).
+/// * `fpc` - Optional finite population correction values per unit.
+/// * `unit_weights` - Per-unit survey weights (length N).
+///
+/// # Returns
+/// A [`SurveyDiagnostics`] struct with DEFF and high-FPC information.
+pub fn compute_survey_diagnostics(
+    strata: &[i64],
+    psu: &[i64],
+    fpc: Option<&[f64]>,
+    unit_weights: &[f64],
+) -> SurveyDiagnostics {
+    let n = unit_weights.len();
+
+    // --- Compute Kish DEFF (weights design effect) ---
+    // deff_w = n * sum(w_i^2) / (sum(w_i))^2
+    let deff_weights = compute_kish_deff(unit_weights);
+
+    // --- Detect high sampling fraction strata ---
+    let (high_fpc_strata, max_fh) = if let Some(fpc_vals) = fpc {
+        if n > 0 {
+            detect_high_fpc_strata(strata, psu, fpc_vals)
+        } else {
+            (Vec::new(), f64::NAN)
+        }
+    } else {
+        (Vec::new(), f64::NAN)
+    };
+
+    let n_high_fpc = high_fpc_strata.len();
+
+    SurveyDiagnostics {
+        deff_weights,
+        high_fpc_strata,
+        max_fh,
+        n_high_fpc,
     }
+}
+
+/// Compute the Kish (1965) design effect from unequal weighting.
+///
+/// Formula: deff_w = n * Σ(w_i²) / (Σw_i)²
+/// Equivalent to: deff_w = 1 + CV²(w)
+///
+/// # Edge cases
+/// - All zero weights → returns NaN
+/// - Single weight → returns 1.0
+/// - Equal weights → returns 1.0
+fn compute_kish_deff(weights: &[f64]) -> f64 {
+    let n = weights.len();
+    if n == 0 {
+        return f64::NAN;
+    }
+
+    let mut sum_w = 0.0_f64;
+    let mut sum_w2 = 0.0_f64;
+    let mut n_positive = 0usize;
+
+    for &w in weights {
+        if w.is_finite() && w > 0.0 {
+            sum_w += w;
+            sum_w2 += w * w;
+            n_positive += 1;
+        }
+    }
+
+    // Guard against degenerate cases.
+    if n_positive == 0 || sum_w <= 0.0 {
+        return f64::NAN;
+    }
+    if n_positive == 1 {
+        return 1.0;
+    }
+
+    let deff = (n_positive as f64) * sum_w2 / (sum_w * sum_w);
+
+    // Numerical guard: DEFF should always be >= 1.0 by Jensen's inequality.
+    if deff < 1.0 {
+        1.0
+    } else {
+        deff
+    }
+}
+
+/// Detect strata with sampling fraction f_h > 0.5.
+///
+/// Returns the list of high-FPC strata and the maximum f_h observed.
+fn detect_high_fpc_strata(
+    strata: &[i64],
+    psu: &[i64],
+    fpc_vals: &[f64],
+) -> (Vec<HighFpcStratum>, f64) {
+    use std::collections::BTreeMap;
+
+    // Group by stratum to count distinct PSUs and get FPC value.
+    let mut strata_map: BTreeMap<i64, (std::collections::BTreeSet<i64>, f64)> = BTreeMap::new();
+
+    for (idx, (&s, &p)) in strata.iter().zip(psu.iter()).enumerate() {
+        let entry = strata_map.entry(s).or_insert_with(|| {
+            (std::collections::BTreeSet::new(), fpc_vals[idx])
+        });
+        entry.0.insert(p);
+    }
+
+    let mut high_fpc_strata = Vec::new();
+    let mut max_fh = f64::NEG_INFINITY;
+
+    for (stratum_index, (psu_set, fpc_val)) in strata_map.values().enumerate() {
+        let stratum_index = stratum_index + 1;
+        let n_h = psu_set.len();
+        let big_n_h = *fpc_val;
+
+        if !big_n_h.is_finite() || big_n_h <= 0.0 {
+            continue;
+        }
+
+        let f_h = n_h as f64 / big_n_h;
+
+        if f_h > max_fh {
+            max_fh = f_h;
+        }
+
+        if f_h > 0.5 {
+            high_fpc_strata.push(HighFpcStratum {
+                stratum_index,
+                f_h,
+                n_h,
+                big_n_h,
+            });
+        }
+    }
+
+    if max_fh == f64::NEG_INFINITY {
+        max_fh = f64::NAN;
+    }
+
+    (high_fpc_strata, max_fh)
 }
 
 #[cfg(test)]

@@ -186,73 +186,102 @@ end
 /*==============================================================================
   Weight Heatmap
 
-  Generates a heatmap of the weight matrix.
+  Generates a 2D heatmap of the T x N weight matrix using twoway contour.
   If e(W_mat) is available, it is used directly.
   Otherwise, an outer-product approximation is constructed:
     - Twostep: theta * omega'
     - Joint: delta_time * delta_unit'
-  Requires the user-written command -heatplot-.
+  Uses Stata built-in twoway contour (no external packages required).
 ==============================================================================*/
 program define _graph_weight_heatmap
-    // Check for heatplot package
-    capture which heatplot
-    if _rc {
-        di as error "heatplot command not found"
-        di as error "Install via: {bf:ssc install heatplot}"
-        di as error ""
-        di as error "Alternative: Use {bf:estat weights} without {bf:heatmap}"
-        exit 199
+    
+    // Determine method and construct weight matrix in Mata
+    local method = "`e(method)'"
+    if "`method'" == "" {
+        local method = "twostep"
     }
     
-    // Check for stored weight matrix
-    capture confirm matrix e(W_mat)
-    local has_W_mat = (_rc == 0)
+    // Check availability of weight vectors
+    local can_plot = 0
+    local title_suffix = ""
     
-    if `has_W_mat' {
-        heatplot e(W_mat), ///
-            title("Weight Matrix") ///
-            xlabel("Time period") ///
-            ylabel("Unit") ///
-            legend(title("Weight")) ///
-            scheme(s2color)
+    // First check for pre-stored full weight matrix
+    capture confirm matrix e(W_mat)
+    if !_rc {
+        local can_plot = 1
+        local title_suffix = ""
+        tempname W_heatmap
+        matrix `W_heatmap' = e(W_mat)
     }
     else {
-        // Construct weight matrix from available vectors
-        local can_reconstruct = 0
-        capture confirm matrix e(theta)
-        if !_rc {
-            capture confirm matrix e(omega)
+        // Reconstruct from vectors via outer product
+        if "`method'" == "twostep" {
+            capture confirm matrix e(theta)
             if !_rc {
-                local can_reconstruct = 1
-                tempname W_approx
-                mata: st_matrix("`W_approx'", st_matrix("e(theta)") * st_matrix("e(omega)")')
+                capture confirm matrix e(omega)
+                if !_rc {
+                    local can_plot = 1
+                    local title_suffix = " (theta x omega)"
+                    tempname W_heatmap
+                    mata: st_matrix("`W_heatmap'", ///
+                        _trop_heatmap_outer("e(theta)", "e(omega)"))
+                }
             }
         }
-        if !`can_reconstruct' {
+        else {
             capture confirm matrix e(delta_time)
             if !_rc {
                 capture confirm matrix e(delta_unit)
                 if !_rc {
-                    local can_reconstruct = 1
-                    tempname W_approx
-                    mata: st_matrix("`W_approx'", st_matrix("e(delta_time)") * st_matrix("e(delta_unit)")')
+                    local can_plot = 1
+                    local title_suffix = " (delta_time x delta_unit)"
+                    tempname W_heatmap
+                    mata: st_matrix("`W_heatmap'", ///
+                        _trop_heatmap_outer("e(delta_time)", "e(delta_unit)"))
                 }
             }
         }
-        if `can_reconstruct' {
-            heatplot `W_approx', ///
-                title("Weight Matrix (reconstructed)") ///
-                xlabel("Time period") ///
-                ylabel("Unit") ///
-                legend(title("Weight")) ///
-                note("Note: Outer product approximation.") ///
-                scheme(s2color)
-        }
-        else {
-            di as error "Cannot generate heatmap: weight matrices not available"
-            exit 111
+    }
+    
+    if !`can_plot' {
+        di as error "Cannot generate heatmap: weight matrices not available"
+        exit 111
+    }
+    
+    // Get matrix dimensions
+    local T = rowsof(`W_heatmap')
+    local N = colsof(`W_heatmap')
+    local total = `T' * `N'
+    
+    // Expand matrix to long format for twoway contour
+    preserve
+    quietly {
+        clear
+        set obs `total'
+        gen double _period = .
+        gen double _unit = .
+        gen double _weight = .
+        
+        local obs = 0
+        forvalues t = 1/`T' {
+            forvalues i = 1/`N' {
+                local ++obs
+                replace _period = `t' in `obs'
+                replace _unit = `i' in `obs'
+                replace _weight = `W_heatmap'[`t', `i'] in `obs'
+            }
         }
     }
+    
+    // Generate heatmap using twoway contour
+    local gtitle "Weight Heatmap`title_suffix'"
+    twoway (contour _weight _period _unit, ///
+        ccolors(white*0.1 yellow*0.5 orange*0.7 red*0.9 red)), ///
+        xtitle("Time Period") ytitle("Unit") ///
+        title("`gtitle'") ///
+        name(_trop_weight_heatmap, replace)
+    
+    restore
 end
 
 /*==============================================================================
@@ -305,6 +334,37 @@ mata:
 mata set matastrict on
 
 /*------------------------------------------------------------------------------
+  _trop_heatmap_outer()
+
+  Computes the outer product of two weight vectors for heatmap visualization.
+  Ensures both vectors are column-oriented before computing the product.
+
+  Arguments:
+    matname_t - Name of the Stata matrix for time weights (T x 1)
+    matname_u - Name of the Stata matrix for unit weights (N x 1)
+
+  Returns:
+    T x N matrix (outer product)
+------------------------------------------------------------------------------*/
+real matrix _trop_heatmap_outer(string scalar matname_t, string scalar matname_u)
+{
+    real colvector t_vec, u_vec
+    
+    t_vec = st_matrix(matname_t)
+    u_vec = st_matrix(matname_u)
+    
+    // Ensure column orientation
+    if (cols(t_vec) > rows(t_vec)) {
+        t_vec = t_vec'
+    }
+    if (cols(u_vec) > rows(u_vec)) {
+        u_vec = u_vec'
+    }
+    
+    return(t_vec * u_vec')
+}
+
+/*------------------------------------------------------------------------------
   _display_weight_vector_stats()
 
   Displays summary statistics (Mean, Std. Dev., Min, Max) for a weight vector.
@@ -351,43 +411,6 @@ void _display_weight_vector_stats(string scalar matname, string scalar wtype)
     else {
         printf("{txt}  Min      = {res}%10.4f{txt} (i={res}%g{txt})\n", min_val, min_idx)
         printf("{txt}  Max      = {res}%10.4f{txt} (i={res}%g{txt})\n", max_val, max_idx)
-    }
-}
-
-/*------------------------------------------------------------------------------
-  _trop_interpolate_percentile()
-
-  Calculates the p-th percentile of a sorted vector using linear interpolation.
-  Index calculation: (n-1)*p.
-
-  Arguments:
-    sorted_v - Sorted column vector
-    p        - Percentile (0 to 1)
-
-  Returns:
-    Interpolated value
-------------------------------------------------------------------------------*/
-real scalar _trop_interpolate_percentile(real colvector sorted_v, real scalar p)
-{
-    real scalar n, idx_f, idx_low, idx_high, frac
-    
-    n = rows(sorted_v)
-    if (n == 0) return(.)
-    if (n == 1) return(sorted_v[1])
-    
-    idx_f = (n - 1) * p
-    idx_low = floor(idx_f)
-    idx_high = ceil(idx_f)
-    
-    idx_low = max((0, min((n - 1, idx_low))))
-    idx_high = max((0, min((n - 1, idx_high))))
-    
-    if (idx_low == idx_high) {
-        return(sorted_v[idx_low + 1])
-    }
-    else {
-        frac = idx_f - idx_low
-        return(sorted_v[idx_low + 1] * (1 - frac) + sorted_v[idx_high + 1] * frac)
     }
 }
 

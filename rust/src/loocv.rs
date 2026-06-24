@@ -34,7 +34,9 @@ use crate::estimation::{
     debug_assert_delta_is_1minus_d_masked, estimate_model, solve_joint_no_lowrank,
     solve_joint_with_lowrank,
 };
-use crate::weights::{compute_joint_weights, compute_weight_matrix_cached};
+use crate::weights::{
+    compute_joint_weights_into, compute_weight_matrix_cached_into,
+};
 
 /// Numerical tolerance inside `better_candidate` for declaring two LOOCV
 /// scores equivalent.  Scores within `TIE_TOL` of each other are treated as a
@@ -58,9 +60,9 @@ pub const TIE_TOL: f64 = 1e-10;
 ///   2. Score strictly higher by more than `TIE_TOL`: keep `best`.
 ///   3. Otherwise (tie within `TIE_TOL`), break the tie by the Occam's razor
 ///      policy:
-///        a. Prefer larger λ_nn (stronger nuclear-norm penalty → simpler L).
-///        b. If equal, prefer smaller λ_time (more uniform time weights).
-///        c. If equal, prefer smaller λ_unit (more uniform unit weights).
+///      a. Prefer larger λ_nn (stronger nuclear-norm penalty → simpler L).
+///      b. If equal, prefer smaller λ_time (more uniform time weights).
+///      c. If equal, prefer smaller λ_unit (more uniform unit weights).
 ///
 /// Each tuple component is ordered using `f64::total_cmp` so that `+Inf` and
 /// finite values order correctly and `NaN` is handled deterministically
@@ -255,6 +257,26 @@ pub fn check_simultaneous_adoption(d: &ArrayView2<f64>) -> TropResult<usize> {
     Ok(n_periods.saturating_sub(t1))
 }
 
+/// Validates that the treatment matrix contains at least one treated observation.
+///
+/// Scans the `D` matrix for any cell equal to 1.0.  Returns `Ok(())` when at
+/// least one treated cell exists, or `Err(TropError::NoTreated)` if the panel
+/// has no treatment at all.
+///
+/// This guard prevents silent no-op estimation when the user inadvertently
+/// passes an all-zero treatment indicator (e.g., wrong variable name or
+/// subsetting that drops all treated units).
+pub fn validate_has_treated_units(d: &ArrayView2<f64>) -> Result<(), TropError> {
+    for t in 0..d.nrows() {
+        for i in 0..d.ncols() {
+            if d[[t, i]] == 1.0 {
+                return Ok(());
+            }
+        }
+    }
+    Err(TropError::NoTreated)
+}
+
 /// Evaluate the LOOCV criterion for a single (λ_time, λ_unit, λ_nn) triple
 /// under the twostep method (paper Algorithm 2 step 2).
 ///
@@ -302,11 +324,16 @@ pub fn loocv_score_for_params(
     let mut warm_beta: Option<Array1<f64>> = None;
     let mut warm_l: Option<Array2<f64>> = None;
 
+    // Reuse a single weight buffer across all control observations to avoid
+    // repeated (T × N) heap allocations inside the LOOCV hot loop.
+    let mut weight_buf = Array2::<f64>::zeros((n_periods, n_units));
+
     for &(t, i) in control_obs {
         // Compute observation-specific weight matrix (using the cache so
         // we avoid repeating the O(T) pairwise distance computation for
         // every control observation).
-        let weight_matrix = compute_weight_matrix_cached(
+        compute_weight_matrix_cached_into(
+            &mut weight_buf,
             y,
             d,
             dist_cache,
@@ -329,7 +356,7 @@ pub fn loocv_score_for_params(
         match estimate_model(
             y,
             control_mask,
-            &weight_matrix.view(),
+            &weight_buf.view(),
             lambda_nn,
             n_periods,
             n_units,
@@ -421,8 +448,12 @@ pub fn loocv_score_for_params_full_diagnostic(
     let mut warm_beta: Option<Array1<f64>> = None;
     let mut warm_l: Option<Array2<f64>> = None;
 
+    // Reuse a single weight buffer across all control observations.
+    let mut weight_buf = Array2::<f64>::zeros((n_periods, n_units));
+
     for &(t, i) in control_obs {
-        let weight_matrix = compute_weight_matrix_cached(
+        compute_weight_matrix_cached_into(
+            &mut weight_buf,
             y,
             d,
             dist_cache,
@@ -443,7 +474,7 @@ pub fn loocv_score_for_params_full_diagnostic(
         match estimate_model(
             y,
             control_mask,
-            &weight_matrix.view(),
+            &weight_buf.view(),
             lambda_nn,
             n_periods,
             n_units,
@@ -492,7 +523,7 @@ pub fn loocv_score_for_params_full_diagnostic(
 ///
 /// # Arguments
 /// * `param_type` — Which parameter to search: 0 = λ_time, 1 = λ_unit,
-///                  2 = λ_nn.
+///   2 = λ_nn.
 ///
 /// # Returns
 /// `(best_value, best_score)`
@@ -719,7 +750,7 @@ pub fn loocv_grid_search(
     max_iter: usize,
     tol: f64,
     x: Option<&ArrayView2<f64>>,
-) -> LoocvGridSearchResult {
+) -> TropResult<LoocvGridSearchResult> {
     let (result, _, _, _) = loocv_grid_search_with_stage1(
         y,
         d,
@@ -731,8 +762,8 @@ pub fn loocv_grid_search(
         max_iter,
         tol,
         x,
-    );
-    result
+    )?;
+    Ok(result)
 }
 
 /// Two-stage LOOCV search for the twostep method, returning the Stage-1
@@ -761,7 +792,10 @@ pub fn loocv_grid_search_with_stage1(
     max_iter: usize,
     tol: f64,
     x: Option<&ArrayView2<f64>>,
-) -> LoocvGridSearchResultWithStage1 {
+) -> TropResult<LoocvGridSearchResultWithStage1> {
+    // Guard: ensure at least one treated cell exists to avoid silent no-op.
+    validate_has_treated_units(d)?;
+
     // Per paper Eq. 5: Q(λ) sums over every D=0 cell.
     let control_obs = get_control_observations(y, control_mask);
     let n_attempted = control_obs.len();
@@ -892,7 +926,7 @@ pub fn loocv_grid_search_with_stage1(
         n_attempted,
         first_failed,
     );
-    (result, lambda_time_init, lambda_unit_init, lambda_nn_init)
+    Ok((result, lambda_time_init, lambda_unit_init, lambda_nn_init))
 }
 
 /// Exhaustive (Cartesian) LOOCV grid search for the twostep method.
@@ -924,7 +958,10 @@ pub fn loocv_grid_search_exhaustive(
     max_iter: usize,
     tol: f64,
     x: Option<&ArrayView2<f64>>,
-) -> LoocvGridSearchResult {
+) -> TropResult<LoocvGridSearchResult> {
+    // Guard: ensure at least one treated cell exists to avoid silent no-op.
+    validate_has_treated_units(d)?;
+
     // Per paper Eq. 5: Q(λ) sums over every D=0 cell.
     let control_obs = get_control_observations(y, control_mask);
     let n_attempted = control_obs.len();
@@ -1024,7 +1061,7 @@ pub fn loocv_grid_search_exhaustive(
     );
     let first_failed = failed_obs.first().copied();
 
-    (
+    Ok((
         best_result.0,
         best_result.1,
         best_result.2,
@@ -1032,7 +1069,7 @@ pub fn loocv_grid_search_exhaustive(
         n_valid,
         n_attempted,
         first_failed,
-    )
+    ))
 }
 
 /// Evaluate the LOOCV criterion for a single (λ_time, λ_unit, λ_nn) triple
@@ -1070,12 +1107,16 @@ pub fn loocv_score_joint(
     let mut tau_sq_sum = 0.0;
     let mut n_valid = 0usize;
 
-    // Compute global weights δ (shared across all LOOCV iterations).
-    let delta = compute_joint_weights(y, d, lambda_time, lambda_unit, treated_periods);
+    // Compute global weights δ once into a reusable buffer.
+    let mut delta = Array2::<f64>::zeros((n_periods, n_units));
+    compute_joint_weights_into(&mut delta, y, d, lambda_time, lambda_unit, treated_periods);
+
+    // Reuse a single buffer for the leave-one-cell-out copy of δ.
+    let mut delta_ex = Array2::<f64>::zeros((n_periods, n_units));
 
     for &(t_ex, i_ex) in control_obs {
         // Zero out the excluded observation's weight.
-        let mut delta_ex = delta.clone();
+        delta_ex.assign(&delta);
         delta_ex[[t_ex, i_ex]] = 0.0;
 
         // Fit joint model with the modified weights.
@@ -1172,12 +1213,16 @@ pub fn loocv_score_joint_full_diagnostic(
     let mut n_valid = 0usize;
     let mut failed_obs: Vec<(usize, usize)> = Vec::new();
 
-    // Compute global weights δ once (shared across every LOOCV iteration).
-    let delta = compute_joint_weights(y, d, lambda_time, lambda_unit, treated_periods);
+    // Compute global weights δ once into a reusable buffer.
+    let mut delta = Array2::<f64>::zeros((n_periods, n_units));
+    compute_joint_weights_into(&mut delta, y, d, lambda_time, lambda_unit, treated_periods);
+
+    // Reuse a single buffer for the leave-one-cell-out copy of δ.
+    let mut delta_ex = Array2::<f64>::zeros((n_periods, n_units));
 
     for &(t_ex, i_ex) in control_obs {
         // Zero out the excluded cell's weight (Eq. 4 analogue under shared δ).
-        let mut delta_ex = delta.clone();
+        delta_ex.assign(&delta);
         delta_ex[[t_ex, i_ex]] = 0.0;
 
         // B.2 defensive check: delta_ex inherits the (1 − D) mask from δ.
@@ -1376,6 +1421,7 @@ pub fn loocv_grid_search_joint(
 /// Callers that additionally want the Stage-1 univariate initialisation
 /// triple (paper Footnote 2) should use
 /// [`loocv_cycling_search_joint_with_stage1`] instead.
+#[allow(clippy::too_many_arguments)]
 pub fn loocv_cycling_search_joint(
     y: &ArrayView2<f64>,
     d: &ArrayView2<f64>,
@@ -1451,6 +1497,7 @@ pub fn loocv_cycling_search_joint_with_stage1(
             // Snapshot `best_score_hint` as the early-termination bound for
             // the parallel batch.  Each thread prunes candidates whose partial
             // Q(λ) exceeds this bound (Q is a sum of non-negative τ̂² terms).
+            #[allow(clippy::type_complexity)]
             let results: Vec<(f64, f64, f64, f64, f64, usize, Option<(usize, usize)>)> = grid
                 .par_iter()
                 .map(|&val| {
@@ -1612,6 +1659,7 @@ pub fn loocv_cycling_search_joint_with_stage1(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::weights::compute_joint_weights;
     use ndarray::array;
 
     #[test]
@@ -2138,7 +2186,7 @@ mod tests {
             100,
             1e-6,
             None,
-        );
+        ).unwrap();
 
         // Verify diagnostic constraints
         assert!(
@@ -2195,7 +2243,7 @@ mod tests {
             100,
             1e-6,
             None,
-        );
+        ).unwrap();
 
         assert_eq!(n_attempted, 19, "Must enumerate all D=0 cells");
         assert!(n_valid <= n_attempted, "n_valid should be <= n_attempted");
@@ -2428,7 +2476,7 @@ mod tests {
             100,
             1e-6,
             None,
-        );
+        ).unwrap();
 
         assert!(
             lambda_time_grid.contains(&best_lt),
@@ -2555,7 +2603,7 @@ mod tests {
             100,
             1e-6,
             None,
-        );
+        ).unwrap();
         let exhaustive = loocv_grid_search_exhaustive(
             &y.view(),
             &d.view(),
@@ -2567,7 +2615,7 @@ mod tests {
             100,
             1e-6,
             None,
-        );
+        ).unwrap();
 
         // Exhaustive is guaranteed to find the global grid minimum; cycling
         // may converge to a local minimum.  In both cases the selected λ
@@ -2631,7 +2679,7 @@ mod tests {
             100,
             1e-6,
             None,
-        );
+        ).unwrap();
         let r2 = loocv_grid_search_exhaustive(
             &y.view(),
             &d.view(),
@@ -2643,7 +2691,7 @@ mod tests {
             100,
             1e-6,
             None,
-        );
+        ).unwrap();
 
         assert_eq!(r1.0, r2.0, "λ_time must match");
         assert_eq!(r1.1, r2.1, "λ_unit must match");

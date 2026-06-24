@@ -5,7 +5,91 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.2.0] - 2026-06-20
+## [1.2.0] - 2026-06-24
+
+
+### Added (Survey Design)
+- **`trop_stata/ado/trop.ado`** — new `singleunit(centered|skip)` option
+  for Rao-Wu Bootstrap lonely PSU handling strategy.  `skip` (default)
+  omits single-PSU strata from bootstrap variance; `centered` uses the
+  grand-mean centring correction.  Preserves backward compatibility
+  (pre-1.2 behaviour = `skip`).
+
+### Added (Survey Diagnostics)
+- **`e(deff_weights)`** — Kish design effect of pweights
+  (N * sum(w_i^2) / (sum(w_i))^2); stored when pweights are supplied.
+  An advisory note is emitted when deff > 2.
+- **`e(max_fh)`** — maximum finite-population fraction f_h across strata
+  (Rao-Wu bootstrap).
+- **`e(n_high_fpc)`** — number of strata where f_h > 0.5 (high FPC
+  detection).
+
+### Added (Pre-trend Test)
+- **`trop_stata/ado/_trop_estat_pretrend.ado`** — new `estat pretrend`
+  subcommand implementing a simplified Wald test (chi-squared statistic)
+  for the joint null H0: tau(-K) = ... = tau(-1) = 0.  Requires
+  `method(twostep)`.  Returns `r(chi2)`, `r(df)`, `r(p)`,
+  `r(pretrend_pass)`, `r(n_preperiods)`.
+
+### Added (Event Study Plot)
+- **`trop_stata/ado/_trop_estat_eventstudy.ado`** — publication-quality
+  native graph via `estat eventstudy, graph`.  New graph customisation
+  options: `cicolor()`, `mcolor()`, `msymbol()`, `msize()`, `connect`,
+  `saving()`.
+
+### Added (Diagnostic Scalars)
+- **`e(loocv_rmse)`** — LOOCV root mean squared error =
+  sqrt(Q(lambda_hat) / n_valid).
+- **`e(condition_number)`** — condition number of the WLS design matrix;
+  large values (>1e10) indicate ill-conditioning.
+- **`e(spec_string)`** — specification string recording estimation call
+  parameters for reproducibility.
+
+### Added (Verbose Levels)
+- **`vlevel(0/1/2/3/4)`** option — 5-level output control:
+  0=silent, 1=minimal, 2=detailed (same as `verbose`), 3=debug, 4=trace.
+  Default is 0.  `verbose` without `vlevel()` sets level 2.
+
+### Added (Error Messages)
+- **`trop_stata/ado/trop_handle_error.ado`** — human-readable error
+  descriptions for all 14 Rust error codes.
+
+### Added (Progress Feedback)
+- Command-level start/completion messages emitted at `vlevel >= 1`.
+
+### Added (Boundary Check)
+- `validate_has_treated_units()` in Rust core prevents silent failures
+  on all-control data panels.
+
+### Added (Unit Tests)
+- Covariate SVD fallback (3 tests), SVD truncation boundary (4 tests),
+  error propagation (14 tests).
+
+### Changed
+- **SVD Threshold**: Unified to 1e-10 (aligned with LOOCV TIE_TOL).
+- **maxiter Default**: 100 → 500 (Algorithm 2/3 convergence guarantee).
+- **C Layer**: Dispatch macro refactoring (PARSE_CMD_ENTRY/DISPATCH_CMD_CASE).
+- **I/O Optimization**: Fused panel read (`read_panel_pair_to_matrices`).
+
+### Fixed
+- Backward compatibility: `singleunit()` defaults to `skip` (preserves
+  pre-1.2 behavior).
+- `validate_has_treated_units` uses `?` operator (proper error propagation,
+  not panic).
+- `LAST_CONDITION_NUMBER` thread_local reset at estimation entry (prevents
+  stale values).
+- `trop.sthlp` maxiter default description updated to 500.
+
+### Documentation
+- `trop.sthlp`: new `singleunit()`, `vlevel()` options documented;
+  new `e(loocv_rmse)`, `e(condition_number)`, `e(spec_string)`,
+  `e(deff_weights)`, `e(max_fh)`, `e(n_high_fpc)` stored results added.
+- `trop_estat.sthlp`: `estat pretrend` subcommand fully documented;
+  `estat eventstudy` graph options (cicolor, mcolor, msymbol, msize,
+  connect) documented.
+- Version badge updated to 1.2.0.
+- "Known Limitations" section added (both EN/CN).
+- "Troubleshooting" section added (both EN/CN).
 
 ### Added (Covariate adjustment, paper Section 6.2 Equation 14)
 - **`trop_stata/ado/trop.ado`** — new `covariates(varlist)` option allows

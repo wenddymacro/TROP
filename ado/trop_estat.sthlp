@@ -34,6 +34,11 @@
 {synopt:{opt sens:itivity}}hyperparameter sensitivity analysis{p_end}
 {synopt:{opt vce}}variance-covariance matrix{p_end}
 {synopt:{opt triple:rob}}triple-robustness bias decomposition (Theorem 5.1){p_end}
+{synopt:{opt dist:ance}}unit distance distribution diagnostics{p_end}
+{synopt:{opt mht}}multiple hypothesis testing correction{p_end}
+{synopt:{opt event:study}}event-study analysis (twostep only){p_end}
+{synopt:{opt pre:trend}}pre-trend test (twostep only){p_end}
+{synopt:{opt table}}export results as formatted table (LaTeX/Markdown/CSV){p_end}
 {synoptline}
 {p2colreset}{...}
 
@@ -45,11 +50,13 @@ Abbreviations are shown by underlining.
 {title:Description}
 
 {pstd}
-{cmd:estat} displays postestimation diagnostics after {helpb trop}.  Eight
+{cmd:estat} displays postestimation diagnostics after {helpb trop}.  Thirteen
 subcommands are provided for inspecting the estimation sample, weight
 distributions, hyperparameter selection, factor structure, bootstrap
 inference, sensitivity of the LOOCV objective, the variance-covariance
-matrix, and the Theorem 5.1 triple-robustness bias decomposition.
+matrix, triple-robustness bias decomposition, unit distance distribution,
+multiple hypothesis testing, event-study analysis, pre-trend testing,
+and publication-quality table export.
 
 {pstd}
 All subcommands require that {cmd:trop} has been executed previously.  If no
@@ -305,6 +312,264 @@ Stored results (in {cmd:r()}):
 {synoptline}
 
 
+{dlgtab:estat distance}
+
+{p 8 16 2}
+{cmd:estat distance} [{cmd:,} {opt graph} {opt sav:ing(filename)} {opt bins(#)}]
+
+{pstd}
+Displays unit distance distribution diagnostics.  The pairwise distances
+between panel units are computed as the root-mean-squared difference in
+outcomes across shared control periods (Paper Eq. 3).
+
+{pstd}
+Output includes the distance distribution summary (mean, standard deviation,
+min, max, percentiles) and optionally publication-quality diagnostic plots.
+
+{pstd}
+Options:
+
+{phang}
+{opt graph} displays publication-quality weight diagnostic plots including
+a distance distribution histogram, unit weights vs distance scatter, and
+time weight decay curve (when lambda parameters are available).
+
+{phang}
+{opt saving(filename)} saves the combined diagnostic graph to {it:filename}.
+Requires the {opt graph} option.
+
+{phang}
+{opt bins(#)} specifies the number of histogram bins; default is
+{cmd:bins(30)}.
+
+{pstd}
+Stored results (in {cmd:r()}):
+
+{synoptset 24 tabbed}{...}
+{synopt:{cmd:r(mean_dist)}}mean pairwise distance{p_end}
+{synopt:{cmd:r(sd_dist)}}standard deviation of distances{p_end}
+{synopt:{cmd:r(min_dist)}}minimum distance{p_end}
+{synopt:{cmd:r(max_dist)}}maximum distance{p_end}
+{synopt:{cmd:r(N_pairs)}}number of pairwise distances{p_end}
+{synoptline}
+
+
+{dlgtab:estat mht}
+
+{p 8 16 2}
+{cmd:estat mht} [{cmd:,} {opt method(string)} {opt source(string)} {opt alpha(#)}]
+
+{pstd}
+Performs multiple hypothesis testing correction on treatment effects
+obtained from {cmd:trop}.
+
+{pstd}
+Three correction methods are available:
+
+{phang2}- {bf:bonferroni}: Bonferroni correction (FWER): p_adj_i = min(K * p_i, 1){p_end}
+{phang2}- {bf:holm}: Holm step-down (FWER): sequential correction{p_end}
+{phang2}- {bf:bh}: Benjamini-Hochberg (FDR): sequential correction (default){p_end}
+
+{pstd}
+Options:
+
+{phang}
+{opt method(string)} specifies the correction method; one of {cmd:bonferroni},
+{cmd:holm}, or {cmd:bh} (default).
+
+{phang}
+{opt source(string)} specifies the source of effects; one of {cmd:cells}
+(individual cell-level effects from {cmd:e(tau_matrix)}, requires
+{cmd:method(twostep)}) or {cmd:eventstudy} (event-study horizon effects
+from a prior {cmd:estat eventstudy} call).  Default is {cmd:cells}.
+
+{phang}
+{opt alpha(#)} specifies the significance level; default is {cmd:0.05}.
+
+{pstd}
+Stored results (in {cmd:r()}):
+
+{synoptset 28 tabbed}{...}
+{synopt:{cmd:r(method)}}correction method used{p_end}
+{synopt:{cmd:r(alpha)}}significance level{p_end}
+{synopt:{cmd:r(K)}}number of hypotheses tested{p_end}
+{synopt:{cmd:r(n_reject)}}number of rejections after correction{p_end}
+{synopt:{cmd:r(table)}}matrix of corrected p-values and decisions{p_end}
+{synoptline}
+
+
+{dlgtab:estat eventstudy}
+
+{p 8 16 2}
+{cmd:estat eventstudy} [{cmd:,} {opt w:indow(numlist)} {opt ref:erence(#)}
+{opt placebo} {opt placebo_periods(#)} {opt graph} {opt no:graph}
+{opt level(#)} {opt title(string)} {opt saving(string)}
+{opt connect} {opt cicolor(string)} {opt mcolor(string)}
+{opt msymbol(string)} {opt msize(string)}]
+
+{pstd}
+Aggregates individual treatment effects tau_{i,t} by relative event time
+(horizon h = t - g_i) and optionally performs pre-trend testing.  This
+subcommand requires {cmd:method(twostep)} because only that method produces
+cell-level treatment effects in {cmd:e(tau_matrix)}.
+
+{pstd}
+Options:
+
+{phang}
+{opt window(numlist)} specifies the event-time window [min, max] to
+display; default spans the full available range.
+
+{phang}
+{opt reference(#)} specifies the reference period for normalization;
+default is {cmd:-1} (the last pre-treatment period).
+
+{phang}
+{opt placebo} performs a pre-trend (placebo) test using the pre-treatment
+horizons.
+
+{phang}
+{opt placebo_periods(#)} specifies the number of pre-treatment periods
+used for the placebo test; default is {cmd:3}.
+
+{phang}
+{opt graph} displays an event-study plot with point estimates and
+confidence intervals.
+
+{phang}
+{opt nograph} suppresses the event-study plot.
+
+{phang}
+{opt level(#)} specifies the confidence level; default is {cmd:level(95)}.
+
+{phang}
+{opt title(string)} specifies a custom title for the graph.
+
+{phang}
+{opt saving(string)} saves the graph to a file.
+
+{phang}
+{opt connect} connects point estimates with a line across horizons.
+
+{phang}
+{opt cicolor(string)} specifies the colour for confidence interval caps;
+default is {cmd:"24 105 175"} (publication blue).
+
+{phang}
+{opt mcolor(string)} specifies the marker and line colour for point
+estimates; default is {cmd:"24 105 175"}.
+
+{phang}
+{opt msymbol(string)} specifies the marker symbol; default is {cmd:O}
+(circle).  See {help symbolstyle}.
+
+{phang}
+{opt msize(string)} specifies the marker size; default is
+{cmd:medsmall}.  See {help markersizestyle}.
+
+{pstd}
+Stored results (in {cmd:r()}):
+
+{synoptset 28 tabbed}{...}
+{synopt:{cmd:r(table)}}matrix of event-study estimates (horizon, ATT, SE, CI){p_end}
+{synopt:{cmd:r(n_horizons)}}number of event-time horizons{p_end}
+{synopt:{cmd:r(pretrend_F)}}pre-trend F-statistic (if {opt placebo} specified){p_end}
+{synopt:{cmd:r(pretrend_p)}}pre-trend p-value (if {opt placebo} specified){p_end}
+{synoptline}
+
+
+{dlgtab:estat pretrend}
+
+{p 8 16 2}
+{cmd:estat pretrend} [{cmd:,} {opt p:eriods(#)} {opt l:evel(#)} {opt r:obust}]
+
+{pstd}
+Tests the null hypothesis that all pre-treatment effects are jointly zero:
+
+{p 8 8 2}
+H0: tau(-K) = tau(-K+1) = ... = tau(-1) = 0
+
+{pstd}
+This subcommand requires {cmd:method(twostep)} because only that method
+produces cell-level treatment effects in {cmd:e(tau_matrix)}.  The test
+uses a simplified Wald statistic with a chi-squared reference distribution.
+
+{pstd}
+Options:
+
+{phang}
+{opt periods(#)} specifies the number of pre-treatment periods to include
+in the test.  Default uses all available pre-treatment periods.
+
+{phang}
+{opt level(#)} specifies the significance level for the pass/fail decision;
+default is {cmd:95}.
+
+{phang}
+{opt robust} uses the bootstrap covariance matrix for the pre-treatment
+period effects (if available from a prior {cmd:estat eventstudy} call)
+instead of the default diagonal covariance assumption.
+
+{pstd}
+Stored results (in {cmd:r()}):
+
+{synoptset 28 tabbed}{...}
+{synopt:{cmd:r(chi2)}}Wald chi-squared test statistic{p_end}
+{synopt:{cmd:r(df)}}degrees of freedom (number of pre-periods tested){p_end}
+{synopt:{cmd:r(p)}}p-value{p_end}
+{synopt:{cmd:r(pretrend_pass)}}1 if cannot reject H0 at the given level, 0 otherwise{p_end}
+{synopt:{cmd:r(n_preperiods)}}number of pre-treatment periods used{p_end}
+{synoptline}
+
+
+
+{dlgtab:estat table}
+
+{p 8 16 2}
+{cmd:estat table} [{cmd:,} {opt f:ormat(string)} {opt sav:ing(filename)} {opt ti:tle(string)}
+{opt no:tes(string)} {opt sta:rs} {opt app:end} {opt replace} {opt dec:imals(#)}]
+
+{pstd}
+Produces a publication-quality results table from the {cmd:e()} values
+stored after a {cmd:trop} estimation command.  Supports four output formats
+and optional significance stars.
+
+{pstd}
+Options:
+
+{phang}
+{opt format(string)} specifies the output format; one of {cmd:display} (Stata
+console table, default), {cmd:latex} (LaTeX tabular environment in AER/QJE
+style), {cmd:markdown} (GitHub-flavored Markdown table), or {cmd:csv}
+(comma-separated values).
+
+{phang}
+{opt saving(filename)} writes the formatted table to {it:filename}.  If the
+file already exists, {opt replace} or {opt append} must be specified.
+
+{phang}
+{opt title(string)} specifies a custom table title; default is
+{cmd:"TROP Estimation Results"}.
+
+{phang}
+{opt notes(string)} appends a footnote below the table (LaTeX, Markdown,
+and CSV formats only).
+
+{phang}
+{opt stars} appends significance stars to the ATT estimate: {cmd:***}
+p<0.01, {cmd:**} p<0.05, {cmd:*} p<0.1.
+
+{phang}
+{opt append} appends output to an existing file specified by {opt saving()}.
+
+{phang}
+{opt replace} overwrites an existing file specified by {opt saving()}.
+
+{phang}
+{opt decimals(#)} specifies the number of decimal places for numeric values;
+default is {cmd:4}.
+
+
 {marker examples}{...}
 {title:Examples}
 
@@ -352,6 +617,48 @@ Stored results (in {cmd:r()}):
 
 {pstd}Same with a rank-2 truncation{p_end}
 {phang2}{cmd:. estat triplerob, rank(2)}{p_end}
+
+{pstd}Unit distance distribution{p_end}
+{phang2}{cmd:. estat distance}{p_end}
+
+{pstd}Weight diagnostic plots{p_end}
+{phang2}{cmd:. estat distance, graph}{p_end}
+
+{pstd}Save diagnostic panel to file{p_end}
+{phang2}{cmd:. estat distance, graph saving(weight_diag.png)}{p_end}
+
+{pstd}Multiple hypothesis testing (Benjamini-Hochberg){p_end}
+{phang2}{cmd:. estat mht}{p_end}
+
+{pstd}Bonferroni correction at 1% level{p_end}
+{phang2}{cmd:. estat mht, method(bonferroni) alpha(0.01)}{p_end}
+
+{pstd}Event-study analysis (requires twostep){p_end}
+{phang2}{cmd:. estat eventstudy}{p_end}
+
+{pstd}Event study with graph and placebo test{p_end}
+{phang2}{cmd:. estat eventstudy, graph placebo}{p_end}
+
+{pstd}Event study with custom graph options{p_end}
+{phang2}{cmd:. estat eventstudy, graph connect mcolor("0 100 0") msymbol(D)}{p_end}
+
+{pstd}Pre-trend test{p_end}
+{phang2}{cmd:. estat pretrend}{p_end}
+
+{pstd}Pre-trend test with 5 pre-periods at 99%% level{p_end}
+{phang2}{cmd:. estat pretrend, periods(5) level(99)}{p_end}
+
+{pstd}Export results as formatted table{p_end}
+{phang2}{cmd:. estat table}{p_end}
+
+{pstd}Export LaTeX table with significance stars{p_end}
+{phang2}{cmd:. estat table, format(latex) stars saving(results.tex)}{p_end}
+
+{pstd}Export Markdown table{p_end}
+{phang2}{cmd:. estat table, format(markdown) saving(results.md)}{p_end}
+
+{pstd}Export CSV with custom title{p_end}
+{phang2}{cmd:. estat table, format(csv) title("Model 1") saving(results.csv)}{p_end}
 
 
 {marker results}{...}

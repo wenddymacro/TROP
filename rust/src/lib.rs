@@ -126,6 +126,9 @@ pub unsafe extern "C" fn stata_loocv_grid_search(
     stage1_lambda_time_out: *mut f64,
     stage1_lambda_unit_out: *mut f64,
     stage1_lambda_nn_out: *mut f64,
+    // Covariate support
+    x_ptr: *const f64,
+    n_covariates: i32,
 ) -> i32 {
     catch_panic!({
         if y_ptr.is_null()
@@ -145,6 +148,16 @@ pub unsafe extern "C" fn stata_loocv_grid_search(
 
         let np = n_periods as usize;
         let nu = n_units as usize;
+
+        // Construct covariate matrix view (column-major)
+        let x_view: Option<ArrayView2<f64>> = if n_covariates > 0 && !x_ptr.is_null() {
+            let n_obs = np * nu;
+            let n_cov = n_covariates as usize;
+            let x_slice = std::slice::from_raw_parts(x_ptr, n_obs * n_cov);
+            Some(ArrayView2::from_shape((n_obs, n_cov).f(), x_slice).unwrap())
+        } else {
+            None
+        };
 
         let y = ptr_to_array2(y_ptr, np, nu);
         let d = ptr_to_array2(d_ptr, np, nu);
@@ -170,7 +183,7 @@ pub unsafe extern "C" fn stata_loocv_grid_search(
             stage1_time,
             stage1_unit,
             stage1_nn,
-        ) = loocv::loocv_grid_search_with_stage1(
+        ) = match loocv::loocv_grid_search_with_stage1(
             &y,
             &d,
             &control_mask,
@@ -180,8 +193,11 @@ pub unsafe extern "C" fn stata_loocv_grid_search(
             lambda_nn_grid,
             max_iter as usize,
             tol,
-            None,
-        );
+            x_view.as_ref(),
+        ) {
+            Ok(v) => v,
+            Err(e) => return e.code(),
+        };
 
         *best_lambda_time_out = best_time;
         *best_lambda_unit_out = best_unit;
@@ -263,6 +279,9 @@ pub unsafe extern "C" fn stata_loocv_grid_search_exhaustive(
     n_attempted_out: *mut i32,
     first_failed_t_out: *mut i32,
     first_failed_i_out: *mut i32,
+    // Covariate support
+    x_ptr: *const f64,
+    n_covariates: i32,
 ) -> i32 {
     catch_panic!({
         if y_ptr.is_null()
@@ -283,6 +302,16 @@ pub unsafe extern "C" fn stata_loocv_grid_search_exhaustive(
         let np = n_periods as usize;
         let nu = n_units as usize;
 
+        // Construct covariate matrix view (column-major)
+        let x_view: Option<ArrayView2<f64>> = if n_covariates > 0 && !x_ptr.is_null() {
+            let n_obs = np * nu;
+            let n_cov = n_covariates as usize;
+            let x_slice = std::slice::from_raw_parts(x_ptr, n_obs * n_cov);
+            Some(ArrayView2::from_shape((n_obs, n_cov).f(), x_slice).unwrap())
+        } else {
+            None
+        };
+
         let y = ptr_to_array2(y_ptr, np, nu);
         let d = ptr_to_array2(d_ptr, np, nu);
         let control_mask = ptr_to_array2_u8(control_mask_ptr, np, nu);
@@ -302,7 +331,7 @@ pub unsafe extern "C" fn stata_loocv_grid_search_exhaustive(
             n_valid,
             n_attempted,
             first_failed,
-        ) = loocv::loocv_grid_search_exhaustive(
+        ) = match loocv::loocv_grid_search_exhaustive(
             &y,
             &d,
             &control_mask,
@@ -312,8 +341,11 @@ pub unsafe extern "C" fn stata_loocv_grid_search_exhaustive(
             lambda_nn_grid,
             max_iter as usize,
             tol,
-            None,
-        );
+            x_view.as_ref(),
+        ) {
+            Ok(v) => v,
+            Err(e) => return e.code(),
+        };
 
         *best_lambda_time_out = best_time;
         *best_lambda_unit_out = best_unit;
@@ -382,6 +414,10 @@ pub unsafe extern "C" fn stata_estimate_twostep(
     // so Mata can reconstruct (t,i) indices by iterating D in the same way.
     converged_by_obs_ptr: *mut i32,
     n_iters_by_obs_ptr: *mut i32,
+    // Covariate support
+    x_ptr: *const f64,
+    n_covariates: i32,
+    gamma_out: *mut f64,
 ) -> i32 {
     catch_panic!({
         if y_ptr.is_null()
@@ -395,6 +431,16 @@ pub unsafe extern "C" fn stata_estimate_twostep(
 
         let np = n_periods as usize;
         let nu = n_units as usize;
+
+        // Construct covariate matrix view (column-major)
+        let x_view: Option<ArrayView2<f64>> = if n_covariates > 0 && !x_ptr.is_null() {
+            let n_obs = np * nu;
+            let n_cov = n_covariates as usize;
+            let x_slice = std::slice::from_raw_parts(x_ptr, n_obs * n_cov);
+            Some(ArrayView2::from_shape((n_obs, n_cov).f(), x_slice).unwrap())
+        } else {
+            None
+        };
 
         let y = ptr_to_array2(y_ptr, np, nu);
         let d = ptr_to_array2(d_ptr, np, nu);
@@ -438,6 +484,7 @@ pub unsafe extern "C" fn stata_estimate_twostep(
             alpha: Array1<f64>,
             beta: Array1<f64>,
             l: Array2<f64>,
+            gamma: Option<Array1<f64>>,
             n_iters: usize,
             converged: bool,
         }
@@ -466,16 +513,17 @@ pub unsafe extern "C" fn stata_estimate_twostep(
                     tol,
                     None,
                     None,
-                    None,
+                    x_view.as_ref(),
                     None,
                 ) {
-                    Some((alpha, beta, l, n_iters, did_converge, _gamma)) => {
+                    Some((alpha, beta, l, n_iters, did_converge, gamma)) => {
                         let tau = y[[*t, *i]] - alpha[*i] - beta[*t] - l[[*t, *i]];
                         Some(ObsResult {
                             tau,
                             alpha,
                             beta,
                             l,
+                            gamma,
                             n_iters,
                             converged: did_converge,
                         })
@@ -493,6 +541,7 @@ pub unsafe extern "C" fn stata_estimate_twostep(
         let mut alpha_sum = Array1::<f64>::zeros(nu);
         let mut beta_sum = Array1::<f64>::zeros(np);
         let mut l_sum = Array2::<f64>::zeros((np, nu));
+        let mut gamma_sum: Option<Array1<f64>> = None;
         let mut n_successful: usize = 0;
         let mut max_iters: usize = 0;
         let mut all_successful_converged = true;
@@ -506,6 +555,10 @@ pub unsafe extern "C" fn stata_estimate_twostep(
                     alpha_sum += &obs.alpha;
                     beta_sum += &obs.beta;
                     l_sum += &obs.l;
+                    if let Some(ref g) = obs.gamma {
+                        let gs = gamma_sum.get_or_insert_with(|| Array1::<f64>::zeros(g.len()));
+                        *gs += g;
+                    }
                     n_successful += 1;
                     if obs.n_iters > max_iters {
                         max_iters = obs.n_iters;
@@ -535,6 +588,7 @@ pub unsafe extern "C" fn stata_estimate_twostep(
         let all_alpha = alpha_sum / n_succ_f64;
         let all_beta = beta_sum / n_succ_f64;
         let all_l = l_sum / n_succ_f64;
+        let all_gamma = gamma_sum.map(|g| g / n_succ_f64);
 
         *att_out = att;
         *n_treated_out = tau_values.len() as i32;
@@ -570,6 +624,21 @@ pub unsafe extern "C" fn stata_estimate_twostep(
             array2_to_ptr(&all_l, l_ptr);
         }
 
+        // Write averaged covariate coefficients
+        if !gamma_out.is_null() && n_covariates > 0 {
+            if let Some(ref gamma_vec) = all_gamma {
+                let gamma_slice = std::slice::from_raw_parts_mut(gamma_out, n_covariates as usize);
+                for (idx, val) in gamma_vec.iter().enumerate() {
+                    gamma_slice[idx] = *val;
+                }
+            } else {
+                let gamma_slice = std::slice::from_raw_parts_mut(gamma_out, n_covariates as usize);
+                for val in gamma_slice.iter_mut() {
+                    *val = 0.0;
+                }
+            }
+        }
+
         TropError::Success.code()
     })
 }
@@ -583,7 +652,7 @@ pub unsafe extern "C" fn stata_estimate_twostep(
 /// `ddof` selects the variance denominator:
 ///   - `1` (default) → Bessel-corrected sample variance `1/(B−1)`.
 ///   - `0`           → paper Algorithm 3 population variance `1/B`.
-/// Any other value collapses to `1`.
+///   - Any other value collapses to `1`.
 ///
 /// # Returns
 /// `0` on success; a non-zero `TropError` code otherwise.
@@ -613,6 +682,9 @@ pub unsafe extern "C" fn stata_bootstrap_trop_variance(
     ci_lower_out: *mut f64,
     ci_upper_out: *mut f64,
     n_valid_out: *mut i32,
+    // Covariate support
+    x_ptr: *const f64,
+    n_covariates: i32,
 ) -> i32 {
     catch_panic!({
         if y_ptr.is_null()
@@ -626,6 +698,16 @@ pub unsafe extern "C" fn stata_bootstrap_trop_variance(
 
         let np = n_periods as usize;
         let nu = n_units as usize;
+
+        // Construct covariate matrix view (column-major)
+        let x_view: Option<ArrayView2<f64>> = if n_covariates > 0 && !x_ptr.is_null() {
+            let n_obs = np * nu;
+            let n_cov = n_covariates as usize;
+            let x_slice = std::slice::from_raw_parts(x_ptr, n_obs * n_cov);
+            Some(ArrayView2::from_shape((n_obs, n_cov).f(), x_slice).unwrap())
+        } else {
+            None
+        };
 
         let y = ptr_to_array2(y_ptr, np, nu);
         let d = ptr_to_array2(d_ptr, np, nu);
@@ -655,7 +737,7 @@ pub unsafe extern "C" fn stata_bootstrap_trop_variance(
             seed,
             alpha_eff,
             ddof_u8,
-            None,
+            x_view.as_ref(),
         );
 
         *se_out = result.se;
@@ -722,6 +804,9 @@ pub unsafe extern "C" fn stata_loocv_cycling_search_joint(
     stage1_lambda_time_out: *mut f64,
     stage1_lambda_unit_out: *mut f64,
     stage1_lambda_nn_out: *mut f64,
+    // Covariate support
+    x_ptr: *const f64,
+    n_covariates: i32,
 ) -> i32 {
     catch_panic!({
         if y_ptr.is_null()
@@ -740,6 +825,16 @@ pub unsafe extern "C" fn stata_loocv_cycling_search_joint(
 
         let np = n_periods as usize;
         let nu = n_units as usize;
+
+        // Construct covariate matrix view (column-major)
+        let x_view: Option<ArrayView2<f64>> = if n_covariates > 0 && !x_ptr.is_null() {
+            let n_obs = np * nu;
+            let n_cov = n_covariates as usize;
+            let x_slice = std::slice::from_raw_parts(x_ptr, n_obs * n_cov);
+            Some(ArrayView2::from_shape((n_obs, n_cov).f(), x_slice).unwrap())
+        } else {
+            None
+        };
 
         let y = ptr_to_array2(y_ptr, np, nu);
         let d = ptr_to_array2(d_ptr, np, nu);
@@ -783,7 +878,7 @@ pub unsafe extern "C" fn stata_loocv_cycling_search_joint(
             max_iter as usize,
             tol,
             max_cycles as usize,
-            None,
+            x_view.as_ref(),
         );
 
         *best_lambda_time_out = best_time;
@@ -868,6 +963,9 @@ pub unsafe extern "C" fn stata_loocv_grid_search_joint(
     n_attempted_out: *mut i32,
     first_failed_t_out: *mut i32,
     first_failed_i_out: *mut i32,
+    // Covariate support
+    x_ptr: *const f64,
+    n_covariates: i32,
 ) -> i32 {
     catch_panic!({
         if y_ptr.is_null()
@@ -886,6 +984,16 @@ pub unsafe extern "C" fn stata_loocv_grid_search_joint(
 
         let np = n_periods as usize;
         let nu = n_units as usize;
+
+        // Construct covariate matrix view (column-major)
+        let x_view: Option<ArrayView2<f64>> = if n_covariates > 0 && !x_ptr.is_null() {
+            let n_obs = np * nu;
+            let n_cov = n_covariates as usize;
+            let x_slice = std::slice::from_raw_parts(x_ptr, n_obs * n_cov);
+            Some(ArrayView2::from_shape((n_obs, n_cov).f(), x_slice).unwrap())
+        } else {
+            None
+        };
 
         let y = ptr_to_array2(y_ptr, np, nu);
         let d = ptr_to_array2(d_ptr, np, nu);
@@ -920,7 +1028,7 @@ pub unsafe extern "C" fn stata_loocv_grid_search_joint(
             lambda_nn_grid,
             max_iter as usize,
             tol,
-            None,
+            x_view.as_ref(),
         );
 
         *best_lambda_time_out = best_time;
@@ -984,6 +1092,10 @@ pub unsafe extern "C" fn stata_estimate_joint(
     converged_out: *mut i32,
     tau_vec_ptr: *mut f64,
     n_treated_out: *mut i32,
+    // Covariate support
+    x_ptr: *const f64,
+    n_covariates: i32,
+    gamma_out: *mut f64,
 ) -> i32 {
     catch_panic!({
         if y_ptr.is_null() || d_ptr.is_null() || tau_out.is_null() || mu_out.is_null() {
@@ -992,6 +1104,16 @@ pub unsafe extern "C" fn stata_estimate_joint(
 
         let np = n_periods as usize;
         let nu = n_units as usize;
+
+        // Construct covariate matrix view (column-major)
+        let x_view: Option<ArrayView2<f64>> = if n_covariates > 0 && !x_ptr.is_null() {
+            let n_obs = np * nu;
+            let n_cov = n_covariates as usize;
+            let x_slice = std::slice::from_raw_parts(x_ptr, n_obs * n_cov);
+            Some(ArrayView2::from_shape((n_obs, n_cov).f(), x_slice).unwrap())
+        } else {
+            None
+        };
 
         let y = ptr_to_array2(y_ptr, np, nu);
         let d = ptr_to_array2(d_ptr, np, nu);
@@ -1034,8 +1156,8 @@ pub unsafe extern "C" fn stata_estimate_joint(
         // When λ_nn is large enough, skip the low-rank component entirely.
         // τ is post-hoc: mean residual over treated cells (L ≡ 0 here).
         let result = if ln_eff >= 1e10 {
-            estimation::solve_joint_no_lowrank(&y, &delta.view(), None).map(
-                |(mu, alpha, beta, _gamma)| {
+            estimation::solve_joint_no_lowrank(&y, &delta.view(), x_view.as_ref()).map(
+                |(mu, alpha, beta, gamma)| {
                     let mut tau_sum = 0.0_f64;
                     let mut tau_count = 0usize;
                     for t in 0..np {
@@ -1048,7 +1170,7 @@ pub unsafe extern "C" fn stata_estimate_joint(
                     }
                     let tau = if tau_count > 0 { tau_sum / tau_count as f64 } else { 0.0 };
                     let l = Array2::<f64>::zeros((np, nu));
-                    (mu, alpha, beta, l, tau, 1_usize, true)
+                    (mu, alpha, beta, l, tau, 1_usize, true, gamma)
                 },
             )
         } else {
@@ -1059,14 +1181,12 @@ pub unsafe extern "C" fn stata_estimate_joint(
                 ln_eff,
                 max_iter as usize,
                 tol,
-                None,
-            ).map(|(mu, alpha, beta, l, tau, n_iters, converged, _gamma)| {
-                (mu, alpha, beta, l, tau, n_iters, converged)
-            })
+                x_view.as_ref(),
+            )
         };
 
         match result {
-            Some((mu, alpha, beta, l, tau, n_iters, did_converge)) => {
+            Some((mu, alpha, beta, l, tau, n_iters, did_converge, gamma)) => {
                 *tau_out = tau;
                 *mu_out = mu;
                 *n_iterations_out = n_iters as i32;
@@ -1118,6 +1238,21 @@ pub unsafe extern "C" fn stata_estimate_joint(
                     *n_treated_out = n_treated_cells;
                 }
 
+                // Write covariate coefficients
+                if !gamma_out.is_null() && n_covariates > 0 {
+                    if let Some(ref gamma_vec) = gamma {
+                        let gamma_slice = std::slice::from_raw_parts_mut(gamma_out, n_covariates as usize);
+                        for (idx, val) in gamma_vec.iter().enumerate() {
+                            gamma_slice[idx] = *val;
+                        }
+                    } else {
+                        let gamma_slice = std::slice::from_raw_parts_mut(gamma_out, n_covariates as usize);
+                        for val in gamma_slice.iter_mut() {
+                            *val = 0.0;
+                        }
+                    }
+                }
+
                 TropError::Success.code()
             }
             None => TropError::Convergence.code(),
@@ -1134,7 +1269,7 @@ pub unsafe extern "C" fn stata_estimate_joint(
 /// `ddof` selects the variance denominator:
 ///   - `1` (default) → Bessel-corrected sample variance `1/(B−1)`.
 ///   - `0`           → paper Algorithm 3 population variance `1/B`.
-/// Any other value collapses to `1`.
+///   - Any other value collapses to `1`.
 ///
 /// # Returns
 /// `0` on success; a non-zero `TropError` code otherwise.
@@ -1162,6 +1297,9 @@ pub unsafe extern "C" fn stata_bootstrap_trop_variance_joint(
     ci_lower_out: *mut f64,
     ci_upper_out: *mut f64,
     n_valid_out: *mut i32,
+    // Covariate support
+    x_ptr: *const f64,
+    n_covariates: i32,
 ) -> i32 {
     catch_panic!({
         if y_ptr.is_null() || d_ptr.is_null() || se_out.is_null() {
@@ -1170,6 +1308,16 @@ pub unsafe extern "C" fn stata_bootstrap_trop_variance_joint(
 
         let np = n_periods as usize;
         let nu = n_units as usize;
+
+        // Construct covariate matrix view (column-major)
+        let x_view: Option<ArrayView2<f64>> = if n_covariates > 0 && !x_ptr.is_null() {
+            let n_obs = np * nu;
+            let n_cov = n_covariates as usize;
+            let x_slice = std::slice::from_raw_parts(x_ptr, n_obs * n_cov);
+            Some(ArrayView2::from_shape((n_obs, n_cov).f(), x_slice).unwrap())
+        } else {
+            None
+        };
 
         let y = ptr_to_array2(y_ptr, np, nu);
         let d = ptr_to_array2(d_ptr, np, nu);
@@ -1201,7 +1349,7 @@ pub unsafe extern "C" fn stata_bootstrap_trop_variance_joint(
             seed,
             alpha_eff,
             ddof_u8,
-            None,
+            x_view.as_ref(),
         );
 
         *se_out = result.se;
@@ -1825,6 +1973,7 @@ pub unsafe extern "C" fn stata_bootstrap_trop_variance_rao_wu(
     psu_ptr: *const i64,
     fpc_ptr: *const f64,
     unit_weights_ptr: *const f64,
+    lonely_psu_code: i32,
     estimates_ptr: *mut f64,
     se_out: *mut f64,
     ci_lower_out: *mut f64,
@@ -1864,7 +2013,7 @@ pub unsafe extern "C" fn stata_bootstrap_trop_variance_rao_wu(
         let alpha_eff = if alpha <= 0.0 || alpha >= 1.0 { 0.05 } else { alpha };
         let ddof_u8: u8 = if ddof == 0 { 0 } else { 1 };
 
-        let result = bootstrap::bootstrap_trop_variance_rao_wu(
+        let result = match bootstrap::bootstrap_trop_variance_rao_wu(
             &y,
             &d,
             &control_mask,
@@ -1883,7 +2032,11 @@ pub unsafe extern "C" fn stata_bootstrap_trop_variance_rao_wu(
             fpc,
             unit_weights,
             None,
-        );
+            bootstrap::LonelyPsuStrategy::from_code(lonely_psu_code),
+        ) {
+            Ok(r) => r,
+            Err(e) => return e.code(),
+        };
 
         *se_out = result.se;
 
@@ -1935,6 +2088,7 @@ pub unsafe extern "C" fn stata_bootstrap_trop_variance_rao_wu_joint(
     psu_ptr: *const i64,
     fpc_ptr: *const f64,
     unit_weights_ptr: *const f64,
+    lonely_psu_code: i32,
     estimates_ptr: *mut f64,
     se_out: *mut f64,
     ci_lower_out: *mut f64,
@@ -1975,7 +2129,7 @@ pub unsafe extern "C" fn stata_bootstrap_trop_variance_rao_wu_joint(
         let alpha_eff = if alpha <= 0.0 || alpha >= 1.0 { 0.05 } else { alpha };
         let ddof_u8: u8 = if ddof == 0 { 0 } else { 1 };
 
-        let result = bootstrap::bootstrap_trop_variance_rao_wu_joint(
+        let result = match bootstrap::bootstrap_trop_variance_rao_wu_joint(
             &y,
             &d,
             lambda_time,
@@ -1992,7 +2146,11 @@ pub unsafe extern "C" fn stata_bootstrap_trop_variance_rao_wu_joint(
             fpc,
             unit_weights,
             None,
-        );
+            bootstrap::LonelyPsuStrategy::from_code(lonely_psu_code),
+        ) {
+            Ok(r) => r,
+            Err(e) => return e.code(),
+        };
 
         *se_out = result.se;
 
@@ -2223,6 +2381,18 @@ unsafe fn ptr_to_x_matrix(
 }
 
 /// LOOCV grid search for Twostep with covariates.
+///
+/// # Safety
+///
+/// All pointer arguments must be non-null and point to properly sized,
+/// aligned buffers. The caller must guarantee that buffer lengths match
+/// the declared dimensions.
+///
+/// # Safety
+///
+/// All pointer arguments must be non-null and point to properly sized,
+/// aligned buffers. The caller must guarantee that buffer lengths match
+/// the declared dimensions.
 #[no_mangle]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn stata_loocv_grid_search_with_covariates(
@@ -2304,7 +2474,7 @@ pub unsafe extern "C" fn stata_loocv_grid_search_with_covariates(
             stage1_time,
             stage1_unit,
             stage1_nn,
-        ) = loocv::loocv_grid_search_with_stage1(
+        ) = match loocv::loocv_grid_search_with_stage1(
             &y,
             &d,
             &control_mask,
@@ -2315,7 +2485,10 @@ pub unsafe extern "C" fn stata_loocv_grid_search_with_covariates(
             max_iter as usize,
             tol,
             x_view.as_ref(),
-        );
+        ) {
+            Ok(v) => v,
+            Err(e) => return e.code(),
+        };
 
         *best_lambda_time_out = best_time;
         *best_lambda_unit_out = best_unit;
@@ -2355,6 +2528,18 @@ pub unsafe extern "C" fn stata_loocv_grid_search_with_covariates(
 }
 
 /// Exhaustive LOOCV grid search for Twostep with covariates.
+///
+/// # Safety
+///
+/// All pointer arguments must be non-null and point to properly sized,
+/// aligned buffers. The caller must guarantee that buffer lengths match
+/// the declared dimensions.
+///
+/// # Safety
+///
+/// All pointer arguments must be non-null and point to properly sized,
+/// aligned buffers. The caller must guarantee that buffer lengths match
+/// the declared dimensions.
 #[no_mangle]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn stata_loocv_grid_search_exhaustive_with_covariates(
@@ -2428,7 +2613,7 @@ pub unsafe extern "C" fn stata_loocv_grid_search_exhaustive_with_covariates(
             n_valid,
             n_attempted,
             first_failed,
-        ) = loocv::loocv_grid_search_exhaustive(
+        ) = match loocv::loocv_grid_search_exhaustive(
             &y,
             &d,
             &control_mask,
@@ -2439,7 +2624,10 @@ pub unsafe extern "C" fn stata_loocv_grid_search_exhaustive_with_covariates(
             max_iter as usize,
             tol,
             x_view.as_ref(),
-        );
+        ) {
+            Ok(v) => v,
+            Err(e) => return e.code(),
+        };
 
         *best_lambda_time_out = best_time;
         *best_lambda_unit_out = best_unit;
@@ -2470,6 +2658,18 @@ pub unsafe extern "C" fn stata_loocv_grid_search_exhaustive_with_covariates(
 }
 
 /// Twostep point estimation with covariates.
+///
+/// # Safety
+///
+/// All pointer arguments must be non-null and point to properly sized,
+/// aligned buffers. The caller must guarantee that buffer lengths match
+/// the declared dimensions.
+///
+/// # Safety
+///
+/// All pointer arguments must be non-null and point to properly sized,
+/// aligned buffers. The caller must guarantee that buffer lengths match
+/// the declared dimensions.
 #[no_mangle]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn stata_estimate_twostep_with_covariates(
@@ -2696,6 +2896,18 @@ pub unsafe extern "C" fn stata_estimate_twostep_with_covariates(
 }
 
 /// Bootstrap variance estimation for Twostep with covariates.
+///
+/// # Safety
+///
+/// All pointer arguments must be non-null and point to properly sized,
+/// aligned buffers. The caller must guarantee that buffer lengths match
+/// the declared dimensions.
+///
+/// # Safety
+///
+/// All pointer arguments must be non-null and point to properly sized,
+/// aligned buffers. The caller must guarantee that buffer lengths match
+/// the declared dimensions.
 #[no_mangle]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn stata_bootstrap_trop_variance_with_covariates(
@@ -2789,6 +3001,18 @@ pub unsafe extern "C" fn stata_bootstrap_trop_variance_with_covariates(
 }
 
 /// Joint point estimation with covariates.
+///
+/// # Safety
+///
+/// All pointer arguments must be non-null and point to properly sized,
+/// aligned buffers. The caller must guarantee that buffer lengths match
+/// the declared dimensions.
+///
+/// # Safety
+///
+/// All pointer arguments must be non-null and point to properly sized,
+/// aligned buffers. The caller must guarantee that buffer lengths match
+/// the declared dimensions.
 #[no_mangle]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn stata_estimate_joint_with_covariates(
@@ -2957,6 +3181,18 @@ pub unsafe extern "C" fn stata_estimate_joint_with_covariates(
 }
 
 /// Bootstrap variance estimation for Joint with covariates.
+///
+/// # Safety
+///
+/// All pointer arguments must be non-null and point to properly sized,
+/// aligned buffers. The caller must guarantee that buffer lengths match
+/// the declared dimensions.
+///
+/// # Safety
+///
+/// All pointer arguments must be non-null and point to properly sized,
+/// aligned buffers. The caller must guarantee that buffer lengths match
+/// the declared dimensions.
 #[no_mangle]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn stata_bootstrap_trop_variance_joint_with_covariates(
@@ -3042,6 +3278,90 @@ pub unsafe extern "C" fn stata_bootstrap_trop_variance_joint_with_covariates(
     })
 }
 
+// ---------------------------------------------------------------------------
+// Survey Diagnostics — C ABI exports
+// ---------------------------------------------------------------------------
+
+/// Compute survey diagnostics: Kish DEFF and high-FPC stratum detection.
+///
+/// This is a pure diagnostic function that does not alter any computation.
+/// Call it after a successful Rao-Wu bootstrap to obtain diagnostic scalars.
+///
+/// # Output parameters
+/// * `deff_weights_out` — Kish (1965) design effect due to unequal weighting.
+/// * `max_fh_out` — Maximum sampling fraction across all strata (NaN if no FPC).
+/// * `n_high_fpc_out` — Number of strata with f_h > 0.5.
+/// * `high_fpc_fh_ptr` — If non-null, filled with f_h values for high-FPC strata
+///   (caller must allocate at least `n_high_fpc_out` doubles).
+///
+/// # Safety
+/// All pointers must be non-null and point to properly sized buffers.
+/// `fpc_ptr` may be null if no finite population correction is applied.
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn stata_compute_survey_diagnostics(
+    strata_ptr: *const i64,
+    psu_ptr: *const i64,
+    fpc_ptr: *const f64,
+    unit_weights_ptr: *const f64,
+    n_units: i32,
+    deff_weights_out: *mut f64,
+    max_fh_out: *mut f64,
+    n_high_fpc_out: *mut i32,
+    high_fpc_fh_ptr: *mut f64,
+    high_fpc_max_elements: i32,
+) -> i32 {
+    catch_panic!({
+        if strata_ptr.is_null()
+            || psu_ptr.is_null()
+            || unit_weights_ptr.is_null()
+            || deff_weights_out.is_null()
+            || max_fh_out.is_null()
+            || n_high_fpc_out.is_null()
+        {
+            return TropError::NullPointer.code();
+        }
+
+        let nu = n_units as usize;
+        let strata = slice::from_raw_parts(strata_ptr, nu);
+        let psu = slice::from_raw_parts(psu_ptr, nu);
+        let fpc: Option<&[f64]> = if fpc_ptr.is_null() {
+            None
+        } else {
+            Some(slice::from_raw_parts(fpc_ptr, nu))
+        };
+        let unit_weights = slice::from_raw_parts(unit_weights_ptr, nu);
+
+        let diag = bootstrap::compute_survey_diagnostics(strata, psu, fpc, unit_weights);
+
+        *deff_weights_out = diag.deff_weights;
+        *max_fh_out = diag.max_fh;
+        *n_high_fpc_out = diag.n_high_fpc as i32;
+
+        // Write high-FPC f_h values if buffer provided.
+        if !high_fpc_fh_ptr.is_null() && high_fpc_max_elements > 0 {
+            let max_write = (high_fpc_max_elements as usize).min(diag.high_fpc_strata.len());
+            let out_slice = slice::from_raw_parts_mut(high_fpc_fh_ptr, max_write);
+            for (i, s) in diag.high_fpc_strata.iter().take(max_write).enumerate() {
+                out_slice[i] = s.f_h;
+            }
+        }
+
+        TropError::Success.code()
+    })
+}
+
+/// Returns the condition number from the most recent SVD solve in
+/// [`estimation::solve_lstsq_small`].  This allows the Mata/C layer to
+/// expose `e(condition_number)` for covariate diagnostics without passing
+/// the value through every intermediate function signature.
+///
+/// Returns NaN if no SVD solve has been performed on the current thread.
+#[no_mangle]
+pub extern "C" fn stata_get_last_condition_number() -> f64 {
+    estimation::LAST_CONDITION_NUMBER.with(|c| c.get())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3051,5 +3371,202 @@ mod tests {
         assert_eq!(TropError::Success.code(), 0);
         assert_eq!(TropError::NullPointer.code(), 1);
         assert_eq!(TropError::RustPanic.code(), 8);
+    }
+}
+
+#[cfg(test)]
+mod ffi_error_propagation_tests {
+    use super::*;
+    use std::ptr;
+
+    /// Test: Null pointer to `stata_estimate_twostep` returns NullPointer error code.
+    #[test]
+    fn test_ffi_null_pointer_twostep() {
+        unsafe {
+            let code = stata_estimate_twostep(
+                ptr::null(),     // y_ptr (null)
+                ptr::null(),     // d_ptr
+                ptr::null(),     // control_mask_ptr
+                ptr::null(),     // time_dist_ptr
+                0, 0,            // n_periods, n_units
+                0.0, 0.0, 0.0,  // lambdas
+                100, 1e-4,       // max_iter, tol
+                ptr::null_mut(), // att_out
+                ptr::null_mut(), // tau_ptr
+                ptr::null_mut(), // alpha_ptr
+                ptr::null_mut(), // beta_ptr
+                ptr::null_mut(), // l_ptr
+                ptr::null_mut(), // n_treated_out
+                ptr::null_mut(), // n_iterations_out
+                ptr::null_mut(), // converged_out
+                ptr::null_mut(), // converged_by_obs_ptr
+                ptr::null_mut(), // n_iters_by_obs_ptr
+                ptr::null(),     // x_ptr
+                0,               // n_covariates
+                ptr::null_mut(), // gamma_out
+            );
+            assert_eq!(
+                code,
+                TropError::NullPointer.code(),
+                "Null y_ptr should return NullPointer, got {}",
+                code
+            );
+        }
+    }
+
+    /// Test: Null pointer to `stata_estimate_joint` returns NullPointer error code.
+    #[test]
+    fn test_ffi_null_pointer_joint() {
+        unsafe {
+            let code = stata_estimate_joint(
+                ptr::null(),     // y_ptr (null)
+                ptr::null(),     // d_ptr
+                0, 0,            // n_periods, n_units
+                0.0, 0.0, 0.0,  // lambdas
+                100, 1e-4,       // max_iter, tol
+                ptr::null_mut(), // tau_out
+                ptr::null_mut(), // mu_out
+                ptr::null_mut(), // alpha_ptr
+                ptr::null_mut(), // beta_ptr
+                ptr::null_mut(), // l_ptr
+                ptr::null_mut(), // n_iterations_out
+                ptr::null_mut(), // converged_out
+                ptr::null_mut(), // tau_vec_ptr
+                ptr::null_mut(), // n_treated_out
+                ptr::null(),     // x_ptr
+                0,               // n_covariates
+                ptr::null_mut(), // gamma_out
+            );
+            assert_eq!(
+                code,
+                TropError::NullPointer.code(),
+                "Null y_ptr should return NullPointer, got {}",
+                code
+            );
+        }
+    }
+
+    /// Test: Null pointer to `stata_bootstrap_trop_variance` returns NullPointer.
+    #[test]
+    fn test_ffi_null_pointer_bootstrap() {
+        unsafe {
+            let code = stata_bootstrap_trop_variance(
+                ptr::null(),     // y_ptr (null)
+                ptr::null(),     // d_ptr
+                ptr::null(),     // control_mask_ptr
+                ptr::null(),     // time_dist_ptr
+                0, 0,            // n_periods, n_units
+                0.0, 0.0, 0.0,  // lambdas
+                50,              // n_bootstrap
+                100, 1e-4,       // max_iter, tol
+                42,              // seed
+                0.05,            // alpha
+                1,               // ddof
+                ptr::null_mut(), // estimates_ptr
+                ptr::null_mut(), // se_out
+                ptr::null_mut(), // ci_lower_out
+                ptr::null_mut(), // ci_upper_out
+                ptr::null_mut(), // n_valid_out
+                ptr::null(),     // x_ptr
+                0,               // n_covariates
+            );
+            assert_eq!(
+                code,
+                TropError::NullPointer.code(),
+                "Null y_ptr should return NullPointer, got {}",
+                code
+            );
+        }
+    }
+
+    /// Test: Null pointer to LOOCV grid search returns NullPointer.
+    #[test]
+    fn test_ffi_null_pointer_loocv() {
+        unsafe {
+            let code = stata_loocv_grid_search(
+                ptr::null(),     // y_ptr (null)
+                ptr::null(),     // d_ptr
+                ptr::null(),     // control_mask_ptr
+                ptr::null(),     // time_dist_ptr
+                0, 0,            // n_periods, n_units
+                ptr::null(),     // lambda_time_grid_ptr
+                0,               // lambda_time_grid_len
+                ptr::null(),     // lambda_unit_grid_ptr
+                0,               // lambda_unit_grid_len
+                ptr::null(),     // lambda_nn_grid_ptr
+                0,               // lambda_nn_grid_len
+                100, 1e-4,       // max_iter, tol
+                ptr::null_mut(), // best_lambda_time_out
+                ptr::null_mut(), // best_lambda_unit_out
+                ptr::null_mut(), // best_lambda_nn_out
+                ptr::null_mut(), // best_score_out
+                ptr::null_mut(), // n_valid_out
+                ptr::null_mut(), // n_attempted_out
+                ptr::null_mut(), // first_failed_t_out
+                ptr::null_mut(), // first_failed_i_out
+                ptr::null_mut(), // stage1_lambda_time_out
+                ptr::null_mut(), // stage1_lambda_unit_out
+                ptr::null_mut(), // stage1_lambda_nn_out
+                ptr::null(),     // x_ptr
+                0,               // n_covariates
+            );
+            assert_eq!(
+                code,
+                TropError::NullPointer.code(),
+                "Null y_ptr should return NullPointer, got {}",
+                code
+            );
+        }
+    }
+
+    /// Test: Invalid dimensions (zero) to estimation function.
+    /// With valid pointers but zero dimensions, should return an error (not crash).
+    #[test]
+    fn test_ffi_invalid_dimension_twostep() {
+        let y = [0.0_f64; 1];
+        let d = [0.0_f64; 1];
+        let control_mask = [0u8; 1];
+        let time_dist = [0i64; 1];
+        let mut att = 0.0_f64;
+        let mut tau = 0.0_f64;
+        let mut alpha = 0.0_f64;
+        let mut beta = 0.0_f64;
+        let mut l = 0.0_f64;
+        let mut n_treated = 0i32;
+        let mut n_iterations = 0i32;
+        let mut converged = 0i32;
+        let mut converged_by_obs = 0i32;
+        let mut n_iters_by_obs = 0i32;
+        let mut gamma = 0.0_f64;
+
+        unsafe {
+            let code = stata_estimate_twostep(
+                y.as_ptr(),
+                d.as_ptr(),
+                control_mask.as_ptr(),
+                time_dist.as_ptr(),
+                0, 0,  // zero dimensions
+                1.0, 1.0, 1.0,
+                100, 1e-4,
+                &mut att,
+                &mut tau,
+                &mut alpha,
+                &mut beta,
+                &mut l,
+                &mut n_treated,
+                &mut n_iterations,
+                &mut converged,
+                &mut converged_by_obs,
+                &mut n_iters_by_obs,
+                ptr::null(),  // x_ptr
+                0,            // n_covariates
+                &mut gamma,   // gamma_out
+            );
+            // Should return an error code (non-zero), not crash
+            assert_ne!(
+                code, 0,
+                "Zero dimensions should return an error code, not success"
+            );
+        }
     }
 }

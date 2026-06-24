@@ -56,7 +56,7 @@ requiring {it:depvar} / {it:treatvar}.
 {synopt:{opt twostep_loocv(cycling|exhaustive)}}twostep-method LOOCV search strategy; default is {cmd:cycling}{p_end}
 {synopt:{opt joint_loocv(cycling|exhaustive)}}joint-method LOOCV search strategy; default is {cmd:exhaustive}{p_end}
 {synopt:{opt tol(#)}}convergence tolerance; default is {cmd:1e-6}{p_end}
-{synopt:{opt maxiter(#)}}maximum iterations; default is {cmd:100}{p_end}
+{synopt:{opt maxiter(#)}}maximum iterations; default is {cmd:500}{p_end}
 
 {syntab:Bootstrap Inference}
 {synopt:{opt bootstrap(#)}}bootstrap replications (paper Alg 3); default is {cmd:200}; set {cmd:0} to skip{p_end}
@@ -64,10 +64,22 @@ requiring {it:depvar} / {it:treatvar}.
 {synopt:{opt bsvariance(sample|paper)}}bootstrap variance denominator; default is {cmd:sample} (1/(B-1)); use {cmd:paper} for the Alg 3 denominator (1/B){p_end}
 {synopt:{opt cimethod(percentile|t|normal)}}primary confidence interval type; default is {cmd:percentile} (Alg 3 step 6) when bootstrap is enabled, otherwise {cmd:t}{p_end}
 
+{syntab:Covariates}
+{synopt:{opth covariates(varlist)}}covariates for Eq. 14 adjustment (paper Section 6.2){p_end}
+
+{syntab:Survey Design}
+{synopt:{opth strata(varname)}}stratification variable for Rao-Wu bootstrap{p_end}
+{synopt:{opth psu(varname)}}primary sampling unit variable{p_end}
+{synopt:{opth fpc(varname)}}finite population correction variable{p_end}
+{synopt:{opt nest}}nest PSU within strata{p_end}
+{synopt:{opt singleunit(centered|skip)}}lonely PSU handling strategy; default is {cmd:skip}{p_end}
+
 {syntab:Other}
 {synopt:{opt seed(#)}}random number seed; default is {cmd:42}{p_end}
 {synopt:{opt level(#)}}confidence level; default is {cmd:c(level)}{p_end}
-{synopt:{opt verbose}}display detailed progress information{p_end}
+{synopt:{opt vlevel(#)}}verbose output level (0-4); default is {cmd:0}{p_end}
+{synopt:{opt verbose}}display detailed progress information (equivalent to {cmd:vlevel(2)}){p_end}
+{synopt:{opt notiming}}suppress timing estimate display{p_end}
 {synoptline}
 {p2colreset}{...}
 
@@ -264,7 +276,7 @@ minimization algorithm. Default is {cmd:1e-6}.
 
 {phang}
 {opt maxiter(#)} specifies the maximum number of iterations for the
-alternating minimization algorithm. Default is {cmd:100}.
+alternating minimization algorithm. Default is {cmd:500}.
 
 {dlgtab:Bootstrap Inference}
 
@@ -350,6 +362,62 @@ The chosen denominator is echoed in {cmd:e(bsvariance)}.
 When specified, {opt bsalpha()} overrides {opt level()} and a note is
 printed at estimation time.  New code should prefer {opt level()}.
 
+{dlgtab:Covariates}
+
+{phang}
+{opth covariates(varlist)} specifies covariates to include in estimation
+following the Equation 14 adjustment of Athey et al. (2025) Section 6.2.
+Covariates enter the alternating minimisation as an additional WLS step that
+updates a gamma coefficient vector.  All specified variables must be numeric
+and must not contain missing values in the estimation sample.  The covariate
+variables must not overlap with the outcome or treatment variables.
+
+{pmore}
+Stored results: {cmd:e(gamma)} (1 x p matrix of covariate coefficients),
+{cmd:e(n_covariates)} (scalar), {cmd:e(covariates)} (macro listing the
+covariate variable names).
+
+{pmore}
+Example: {cmd:trop y d, panelvar(id) timevar(t) covariates(x1 x2 x3)}
+
+{dlgtab:Survey Design}
+
+{phang}
+{opth strata(varname)} specifies the stratification variable for Rao-Wu
+bootstrap variance estimation.  Required when {opt psu()} or {opt fpc()} is
+specified.
+
+{phang}
+{opth psu(varname)} specifies the primary sampling unit variable.  Required
+when {opt strata()} is specified.
+
+{phang}
+{opth fpc(varname)} specifies the finite population correction variable.
+Optional; when supplied, the Rao-Wu bootstrap incorporates the sampling
+fraction adjustment.
+
+{phang}
+{opt nest} requests that PSUs be nested within strata (relevant when PSU
+identifiers are not globally unique).
+
+{phang}
+{opt singleunit(centered|skip)} specifies the strategy for handling strata
+containing a single primary sampling unit (lonely PSU) during Rao-Wu
+bootstrap variance estimation.
+
+{pmore}
+{opt skip} (default) omits the lonely-PSU stratum from the bootstrap
+variance contribution entirely.  This preserves backward compatibility with
+pre-1.2 behaviour and is appropriate when the lonely stratum contributes
+negligible variance.
+
+{pmore}
+{opt centered} uses the grand-mean centring correction: the single PSU's
+contribution is computed relative to the overall weighted mean rather than
+the within-stratum mean.  This is the Stata {cmd:svyset} convention for
+{cmd:singleunit(centered)} and avoids discarding information from the
+stratum.
+
 {dlgtab:Other}
 
 {phang}
@@ -361,8 +429,28 @@ Default is {cmd:42}.
 Default is {cmd:c(level)}, typically 95.
 
 {phang}
+{opt vlevel(#)} specifies the verbosity level for output control.
+Five levels are available:
+
+{phang2}{cmd:0} {hline 2} silent (no progress messages){p_end}
+{phang2}{cmd:1} {hline 2} minimal (start/completion only){p_end}
+{phang2}{cmd:2} {hline 2} detailed (LOOCV diagnostics; same as {opt verbose}){p_end}
+{phang2}{cmd:3} {hline 2} debug (intermediate values){p_end}
+{phang2}{cmd:4} {hline 2} trace (all internal steps){p_end}
+
+{pmore}
+Default is {cmd:0}.  When {opt verbose} is specified without {opt vlevel()},
+the level is set to {cmd:2}.
+
+{phang}
 {opt verbose} displays detailed progress information including LOOCV
-diagnostics, convergence status, and timing information.
+diagnostics, convergence status, and timing information.  Equivalent to
+{cmd:vlevel(2)}.
+
+{phang}
+{opt notiming} suppresses the timing estimate display that {cmd:trop}
+normally emits on large panels (N*T >= 50,000).  Use this when the
+progress estimate is not wanted (e.g., in automated scripts).
 
 
 {marker remarks}{...}
@@ -584,9 +672,9 @@ can be read directly against their original identifiers:
 
 {pstd}
 After {cmd:trop}, the companion command {help trop_estat:{bf:estat}}
-exposes eight diagnostics including hyperparameter sensitivity,
-variance-covariance display, and a triple-robustness bias
-decomposition anchored to paper Theorem 5.1:
+exposes thirteen diagnostics including hyperparameter sensitivity,
+variance-covariance display, event-study analysis, pre-trend testing,
+and a triple-robustness bias decomposition anchored to paper Theorem 5.1:
 
 {phang2}{cmd:. trop y d, panelvar(id) timevar(t) bootstrap(200) seed(42)}{p_end}
 {phang2}{cmd:. estat summarize                   // sample + treatment overview}{p_end}
@@ -617,6 +705,187 @@ Average treatment effect within each post-treatment period (event-time path):
 {phang2}{cmd:. mata: present = (tau :< .)                       // 1 if treated cell}{p_end}
 {phang2}{cmd:. mata: att_t = rowsum(editmissing(tau, 0)) :/ rowsum(present)}{p_end}
 {phang2}{cmd:. mata: att_t                                       // T x 1 (missing for pre-treatment rows)}{p_end}
+
+
+{pstd}
+{bf:{hline 70}}
+{bf:Complete Data Analysis Examples}
+{bf:{hline 70}}
+
+{pstd}
+The following three examples demonstrate end-to-end workflows using real
+and simulated panel data.  All datasets are included with the {cmd:trop}
+package under {cmd:data/}.
+
+
+{pstd}
+{bf:Example 1: CPS wage data {hline 2} basic twostep (local) analysis}
+
+{pstd}
+This example reproduces part of the paper's Table 1 analysis of minimum
+wage effects on log wages across U.S. states.  The CPS dataset contains
+50 states observed from 1979 to 2018; 8 states are treated at t=2018.
+The outcome variable {cmd:y} is the log average weekly wage.
+
+{phang}{it:Step 1: Load the CPS log-wage panel}{p_end}
+
+{phang2}{cmd:. use "data/cps_logwage.dta", clear}{p_end}
+{phang2}{cmd:. describe}{p_end}
+{phang2}{cmd:. tab d}{p_end}
+
+{phang}{it:Step 2: Estimate ATT using the twostep (local) method with bootstrap}{p_end}
+
+{phang2}{cmd:. trop y d, panelvar(id) timevar(t) method(twostep) bootstrap(200) seed(42)}{p_end}
+
+{phang}{it:Step 3: Examine stored results}{p_end}
+
+{phang2}{cmd:. ereturn list}{p_end}
+{phang2}{cmd:. display "ATT = " e(att)}{p_end}
+{phang2}{cmd:. display "SE  = " e(se)}{p_end}
+{phang2}{cmd:. display "95%% CI: [" e(ci_lower) ", " e(ci_upper) "]"}{p_end}
+{phang2}{cmd:. display "p-value = " e(pvalue)}{p_end}
+
+{phang}{it:Step 4: Inspect selected hyperparameters}{p_end}
+
+{phang2}{cmd:. display "lambda_time = " e(lambda_time)}{p_end}
+{phang2}{cmd:. display "lambda_unit = " e(lambda_unit)}{p_end}
+{phang2}{cmd:. display "lambda_nn   = " e(lambda_nn)}{p_end}
+
+{phang}{it:Step 5: Postestimation diagnostics}{p_end}
+
+{phang2}{cmd:. estat summarize}{p_end}
+{phang2}{cmd:. estat loocv}{p_end}
+{phang2}{cmd:. estat bootstrap}{p_end}
+
+{pstd}
+{bf:Interpretation.}  The ATT estimates the average treatment effect on
+the treated (paper Eq. 1): the mean counterfactual-adjusted impact of
+the policy change on log wages for the 8 treated states in t=2018.
+A positive ATT implies the treatment raised wages relative to the
+predicted no-treatment trajectory.  The three-way robust construction
+(Theorem 5.1) ensures that the estimate remains valid even if the unit
+weights, time weights, or the nuclear-norm model alone fail to fully
+balance the treated and control groups.
+
+
+{pstd}
+{bf:Example 2: PWT GDP data {hline 2} joint (global) method with advanced options}
+
+{pstd}
+The Penn World Table dataset measures log GDP per capita across 111
+countries from 1960 to 2007; 29 countries receive treatment at t=2007
+(a simultaneous-adoption design).  The larger panel and common adoption
+window make this an ideal setting for the {cmd:joint} estimator.
+
+{phang}{it:Step 1: Load PWT data}{p_end}
+
+{phang2}{cmd:. use "data/pwt_loggdp.dta", clear}{p_end}
+{phang2}{cmd:. summarize}{p_end}
+{phang2}{cmd:. display "N_units = " r(N) / 48 " | T = 48 | Treated = 29"}{p_end}
+
+{phang}{it:Step 2: Joint estimation with fixed lambda (paper Table 2 values)}{p_end}
+
+{phang2}{cmd:. trop y d, panelvar(id) timevar(t) method(joint) fixedlambda(0.4 0.3 0.006) bootstrap(200) seed(42)}{p_end}
+{phang2}{cmd:. display "ATT (joint, fixed lambda) = " e(att)}{p_end}
+
+{phang}{it:Step 3: Compare with LOOCV-selected lambda using fine grid}{p_end}
+
+{phang2}{cmd:. trop y d, panelvar(id) timevar(t) method(joint) grid_style(fine) bootstrap(200) seed(42)}{p_end}
+{phang2}{cmd:. display "ATT (joint, fine grid LOOCV) = " e(att)}{p_end}
+{phang2}{cmd:. display "Selected: lt=" e(lambda_time) " lu=" e(lambda_unit) " lnn=" e(lambda_nn)}{p_end}
+
+{phang}{it:Step 4: Exhaustive vs. cycling LOOCV comparison}{p_end}
+
+{phang2}{cmd:. trop y d, panelvar(id) timevar(t) method(joint) joint_loocv(exhaustive) seed(42)}{p_end}
+{phang2}{cmd:. scalar att_exh = e(att)}{p_end}
+{phang2}{cmd:. trop y d, panelvar(id) timevar(t) method(joint) joint_loocv(cycling) seed(42)}{p_end}
+{phang2}{cmd:. scalar att_cyc = e(att)}{p_end}
+{phang2}{cmd:. display "ATT difference (exhaustive - cycling) = " att_exh - att_cyc}{p_end}
+
+{phang}{it:Step 5: Weight diagnostics}{p_end}
+
+{phang2}{cmd:. trop y d, panelvar(id) timevar(t) method(joint) bootstrap(200) seed(42)}{p_end}
+{phang2}{cmd:. estat weights}{p_end}
+{phang2}{cmd:. estat triplerob}{p_end}
+
+{pstd}
+{bf:Interpretation.}  The joint method assumes a homogeneous treatment
+effect tau across all treated cells (Remark 6.1).  Because 29 countries
+adopt simultaneously, the shared-weight construction is substantively
+appropriate.  The {cmd:estat triplerob} decomposition shows whether the
+triple-robustness property delivers bias reduction via unit balance,
+time balance, or regression adjustment alone.  Comparing fixed lambda
+(from the paper's Table 2) with LOOCV-selected lambda verifies that
+the cross-validation procedure finds values close to the paper's optimal.
+
+
+{pstd}
+{bf:Example 3: Simulated data {hline 2} verification with known true effect}
+
+{pstd}
+This example constructs a panel with a known treatment effect (tau=2.0)
+and demonstrates that {cmd:trop} recovers it accurately.  The simulation
+illustrates the three-way robustness by showing convergence to the
+true effect even under various model misspecification scenarios.
+
+{phang}{it:Step 1: Generate a balanced panel with known DGP}{p_end}
+
+{phang2}{cmd:. clear all}{p_end}
+{phang2}{cmd:. set seed 2025}{p_end}
+{phang2}{cmd:. local N_units = 30}{p_end}
+{phang2}{cmd:. local T_periods = 20}{p_end}
+{phang2}{cmd:. local N_treated = 5}{p_end}
+{phang2}{cmd:. local T_treat = 16}{p_end}
+{phang2}{cmd:. local true_tau = 2.0}{p_end}
+{phang2}{cmd:. set obs `= `N_units' * `T_periods''}{p_end}
+{phang2}{cmd:. gen id = ceil(_n / `T_periods')}{p_end}
+{phang2}{cmd:. bysort id: gen t = _n}{p_end}
+
+{phang}{it:Step 2: Build Y(0) = alpha_i + beta_t + L_{it} + noise}{p_end}
+
+{phang2}{cmd:. gen alpha_i = id * 0.3}{p_end}
+{phang2}{cmd:. gen beta_t  = t * 0.1}{p_end}
+{phang2}{cmd:. gen L_it   = sin(id * 0.5) * cos(t * 0.3)}{p_end}
+{phang2}{cmd:. gen epsilon = rnormal(0, 0.2)}{p_end}
+{phang2}{cmd:. gen d = (id > `N_units' - `N_treated') & (t >= `T_treat')}{p_end}
+{phang2}{cmd:. gen y = alpha_i + beta_t + L_it + epsilon + `true_tau' * d}{p_end}
+
+{phang}{it:Step 3: Estimate with twostep method}{p_end}
+
+{phang2}{cmd:. trop y d, panelvar(id) timevar(t) method(twostep) bootstrap(200) seed(42)}{p_end}
+{phang2}{cmd:. display "True tau       = `true_tau'"}{p_end}
+{phang2}{cmd:. display "Estimated ATT  = " e(att)}{p_end}
+{phang2}{cmd:. display "Bias           = " e(att) - `true_tau'}{p_end}
+{phang2}{cmd:. display "SE             = " e(se)}{p_end}
+{phang2}{cmd:. display "Coverage: " cond(e(ci_lower) <= `true_tau' & `true_tau' <= e(ci_upper), "YES", "NO")}{p_end}
+
+{phang}{it:Step 4: Repeat with joint method for comparison}{p_end}
+
+{phang2}{cmd:. trop y d, panelvar(id) timevar(t) method(joint) bootstrap(200) seed(42)}{p_end}
+{phang2}{cmd:. display "Joint ATT      = " e(att)}{p_end}
+{phang2}{cmd:. display "Joint Bias     = " e(att) - `true_tau'}{p_end}
+
+{phang}{it:Step 5: Verify triple robustness with the bias decomposition}{p_end}
+
+{phang2}{cmd:. trop y d, panelvar(id) timevar(t) bootstrap(200) seed(42)}{p_end}
+{phang2}{cmd:. estat triplerob}{p_end}
+
+{pstd}
+{bf:Interpretation.}  With a known true_tau = 2.0, the estimated ATT
+should be close to 2.0 and the 95%% confidence interval should cover it.
+The bias decomposition ({cmd:estat triplerob}) reveals the three
+components of Theorem 5.1:
+
+{phang2}||Delta^u||_2 {hline 2} unit imbalance{p_end}
+{phang2}||Delta^t||_2 {hline 2} time imbalance{p_end}
+{phang2}||B||_* {hline 2} regression adjustment misspecification{p_end}
+
+{pstd}
+The TROP estimator is consistent if any one of these three quantities is
+zero (Corollary 1).  In this simulated example, the true DGP satisfies
+Y(0) = alpha_i + beta_t + L_{it}, so the nuclear-norm regression
+adjustment is correctly specified (||B||_* approx 0), guaranteeing
+consistency regardless of finite-sample weight imbalance.
 
 
 {marker results}{...}
@@ -653,6 +922,7 @@ Average treatment effect within each post-treatment period (event-time path):
 {synopt:{cmd:e(loocv_n_valid)}}number of successful LOOCV fits{p_end}
 {synopt:{cmd:e(loocv_n_attempted)}}total LOOCV fit attempts (= every D=0 cell, paper Eq. 5){p_end}
 {synopt:{cmd:e(loocv_fail_rate)}}LOOCV failure rate (0 to 1){p_end}
+{synopt:{cmd:e(loocv_rmse)}}LOOCV root mean squared error = sqrt(Q(lambda_hat) / n_valid){p_end}
 {synopt:{cmd:e(loocv_used)}}1 if LOOCV was performed, 0 if skipped{p_end}
 {synopt:{cmd:e(loocv_first_failed_t)}}time index of the first LOOCV fit that failed (0-based; -1 if none){p_end}
 {synopt:{cmd:e(loocv_first_failed_i)}}unit index of the first LOOCV fit that failed (0-based; -1 if none){p_end}
@@ -694,6 +964,11 @@ Average treatment effect within each post-treatment period (event-time path):
 {synopt:{cmd:e(time_range)}}range of time periods{p_end}
 {synopt:{cmd:e(n_pre_periods)}}number of pre-treatment periods{p_end}
 {synopt:{cmd:e(n_post_periods)}}number of post-treatment periods{p_end}
+{synopt:{cmd:e(condition_number)}}condition number of the WLS design matrix; large values (>1e10) indicate ill-conditioning{p_end}
+{synopt:{cmd:e(n_covariates)}}number of covariates (0 if none){p_end}
+{synopt:{cmd:e(deff_weights)}}Kish design effect of pweights = N * sum(w_i^2) / (sum(w_i))^2; measures efficiency loss from unequal weighting.  Only stored when pweights are supplied.{p_end}
+{synopt:{cmd:e(max_fh)}}maximum finite-population fraction f_h across strata (Rao-Wu bootstrap); only stored when survey weights are used{p_end}
+{synopt:{cmd:e(n_high_fpc)}}number of strata where f_h > 0.5 (high FPC detection); only stored when survey weights are used{p_end}
 
 {p2col 5 28 32 2: Matrices}{p_end}
 {synopt:{cmd:e(b)}}coefficient vector (1x1, ATT){p_end}
@@ -713,6 +988,7 @@ Average treatment effect within each post-treatment period (event-time path):
 {synopt:{cmd:e(lambda_time_grid)}}lambda_time grid values searched{p_end}
 {synopt:{cmd:e(lambda_unit_grid)}}lambda_unit grid values searched{p_end}
 {synopt:{cmd:e(lambda_nn_grid)}}lambda_nn grid values searched{p_end}
+{synopt:{cmd:e(gamma)}}covariate coefficients (1 x p; only when {opt covariates()} is specified){p_end}
 {synopt:{cmd:e(lambda_grid)}}Cartesian product of lambda grids (K x 3){p_end}
 {synopt:{cmd:e(cv_curve)}}LOOCV scores at grid points (K x 4){p_end}
 
@@ -738,6 +1014,12 @@ Average treatment effect within each post-treatment period (event-time path):
 {synopt:{cmd:e(weight_var)}}pweight variable name (empty when no {cmd:[pweight=]} was supplied); see {help trop##survey_weights:Survey weights}{p_end}
 {synopt:{cmd:e(wtype)}}weight type tag; set to {cmd:pweight} when weights were supplied, otherwise empty{p_end}
 {synopt:{cmd:e(wexp)}}weight expression as typed (e.g. {cmd:= wgt}); empty without weights{p_end}
+{synopt:{cmd:e(covariates)}}space-separated list of covariate variable names (empty when none){p_end}
+{synopt:{cmd:e(spec_string)}}specification string recording the estimation call parameters (method, lambda values, covariates) for reproducibility{p_end}
+{synopt:{cmd:e(strata_var)}}stratification variable name (survey design only){p_end}
+{synopt:{cmd:e(psu_var)}}PSU variable name (survey design only){p_end}
+{synopt:{cmd:e(fpc_var)}}FPC variable name (survey design only){p_end}
+{synopt:{cmd:e(bootstrap_type)}}bootstrap type: {cmd:standard} or {cmd:rao_wu}{p_end}
 
 {p2col 5 28 32 2: Functions}{p_end}
 {synopt:{cmd:e(sample)}}marks estimation sample{p_end}
@@ -959,9 +1241,12 @@ from the three candidates (percentile, t, normal).  Locked in by
 
 {pstd}
 {bf:Scope exclusions} (paper-adjacent features that {cmd:trop} does not
-implement): survey-weighted bootstrap with strata/PSU/FPC, and time-
-varying covariates X_{it}*beta (paper Section 6.2).  Both lie outside
-the paper's core TROP algorithm and are planned for a future release.
+implement): time-varying covariates X_{it}(t)*beta(t) where the coefficient
+vector varies by period.  The current {opt covariates()} option implements
+the time-invariant form from paper Section 6.2 Equation 14 where gamma is a
+fixed p-vector.  Survey-weighted bootstrap with {opt strata()}/{opt psu()}/
+{opt fpc()} is available since v1.2.0; switching-treatment patterns under
+{opt method(joint)} remain out of scope.
 
 
 {marker references}{...}
@@ -1008,9 +1293,10 @@ wlxu@cityu.edu.mo
 {phang2}{cmd:. trop_check}{p_end}
 
 {pstd}
-The package includes a precompiled plugin for macOS ARM64 (Apple Silicon).
-Other platforms (macOS Intel, Linux x64, Windows x64) can be built from the
-Rust source code.  See the project repository for build instructions.
+The package includes precompiled plugins for macOS ARM64 (Apple Silicon),
+macOS Intel (x86-64), and Windows x64.  No Rust toolchain is required for
+these platforms.  See the project repository for build instructions if you
+need to compile from source.
 
 
 {marker alsosee}{...}

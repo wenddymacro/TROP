@@ -71,6 +71,7 @@ if "`ci_flag'" == "--ci" {
 //   trop_loocv_validation       LOOCV parameter validation.
 //   trop_bootstrap_diagnostics  Bootstrap diagnostic statistics.
 //   trop_estat_helpers          Post-estimation summary utilities.
+//   trop_eventstudy             Event-study aggregation and pre-trend testing.
 //
 // Layer 5: Entry point (depends on Layers 2--4)
 //   trop_main                   Top-level estimation driver.
@@ -88,6 +89,7 @@ local mata_files ///
     "trop_loocv_validation.mata" ///
     "trop_bootstrap_diagnostics.mata" ///
     "trop_estat_helpers.mata" ///
+    "trop_eventstudy.mata" ///
     "trop_main.mata"
 
 // --- Compilation loop --------------------------------------------------------

@@ -373,6 +373,13 @@ real scalar trop_prepare_covariates(
         }
     }
 
+    /* Secondary validation: reject if covariate matrix contains missing values.
+       This should never trigger because the ADO layer rejects missing covariates
+       upstream; included as defensive programming. */
+    if (hasmissing(X)) {
+        _error(416, "internal error: covariate matrix contains missing values after validation")
+    }
+
     /* Store to Stata */
     st_matrix("__trop_covariates", X)
     st_numscalar("__trop_n_covariates", p)
@@ -620,6 +627,58 @@ real scalar trop_prepare_survey_design(
         }
     }
     n_psu = rows(psu_labels)
+
+    /* 3a. Validate FPC >= n_psu_in_stratum for each stratum */
+    if (fpc_var != "") {
+        real scalar h, n_psu_h, fpc_h
+        real colvector psu_in_h
+        for (h = 0; h < n_strata; h++) {
+            psu_in_h = J(0, 1, .)
+            fpc_h = .
+            for (i = 1; i <= n_units; i++) {
+                if (strata_encoded[i] == h) {
+                    if (fpc_h == .) fpc_h = fpc_unit[i]
+                    found = 0
+                    for (idx = 1; idx <= rows(psu_in_h); idx++) {
+                        if (psu_in_h[idx] == psu_encoded[i]) {
+                            found = 1
+                            break
+                        }
+                    }
+                    if (!found) {
+                        psu_in_h = psu_in_h \ psu_encoded[i]
+                    }
+                }
+            }
+            n_psu_h = rows(psu_in_h)
+            if (fpc_h < n_psu_h) {
+                errprintf("fpc() value (%.0f) is less than the number of "
+                    + "PSUs (%g) in stratum %g\n", fpc_h, n_psu_h, h + 1)
+                return(459)
+            }
+        }
+    }
+
+    /* 3b. nest=0: verify PSU codes are globally unique across strata */
+    if (!do_nest) {
+        real colvector psu_unique, strata_for_p, distinct_s
+        real scalar p_idx, p_val
+        psu_unique = uniqrows(psu_encoded)
+        for (p_idx = 1; p_idx <= rows(psu_unique); p_idx++) {
+            p_val = psu_unique[p_idx]
+            strata_for_p = select(strata_encoded, psu_encoded :== p_val)
+            distinct_s = uniqrows(strata_for_p)
+            if (rows(distinct_s) > 1) {
+                errprintf("psu variable is not globally unique "
+                    + "(nest option not specified): ")
+                errprintf("PSU code %g appears in %g different strata\n",
+                    p_val, rows(distinct_s))
+                errprintf("  Use the 'nest' option if PSUs are nested "
+                    + "within strata\n")
+                return(459)
+            }
+        }
+    }
 
     /* 4. Store to Stata matrices */
     st_matrix("__trop_strata", strata_encoded)

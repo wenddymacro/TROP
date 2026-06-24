@@ -18,6 +18,7 @@
     compute_weight_stats()        aggregate weight diagnostics
     compute_bootstrap_stats()     bootstrap distribution summary
     _trop_estat_factors_svd()     SVD of the factor matrix
+    _trop_interpolate_percentile() percentile via linear interpolation
 ──────────────────────────────────────────────────────────────────────────────*/
 
 version 17
@@ -734,6 +735,44 @@ real matrix _trop_treated_coords(real matrix tau_mat)
         }
     }
     return(out)
+}
+
+/*──────────────────────────────────────────────────────────────────────────────
+  _trop_interpolate_percentile()
+
+  Calculates the p-th percentile of a sorted vector using linear interpolation.
+  Index calculation: (n-1)*p.
+
+  Arguments
+    sorted_v   Sorted column vector
+    p          Percentile (0 to 1)
+
+  Returns
+    Interpolated value
+──────────────────────────────────────────────────────────────────────────────*/
+
+real scalar _trop_interpolate_percentile(real colvector sorted_v, real scalar p)
+{
+    real scalar n, idx_f, idx_low, idx_high, frac
+
+    n = rows(sorted_v)
+    if (n == 0) return(.)
+    if (n == 1) return(sorted_v[1])
+
+    idx_f = (n - 1) * p
+    idx_low = floor(idx_f)
+    idx_high = ceil(idx_f)
+
+    idx_low = max((0, min((n - 1, idx_low))))
+    idx_high = max((0, min((n - 1, idx_high))))
+
+    if (idx_low == idx_high) {
+        return(sorted_v[idx_low + 1])
+    }
+    else {
+        frac = idx_f - idx_low
+        return(sorted_v[idx_low + 1] * (1 - frac) + sorted_v[idx_high + 1] * frac)
+    }
 }
 
 /*──────────────────────────────────────────────────────────────────────────────

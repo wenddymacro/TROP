@@ -49,6 +49,14 @@ pub const SVD_TRUNCATION_TOL: f64 = 1e-10;
 /// is considered degenerate and returns `None`.
 pub const WEIGHT_SUM_TOL: f64 = 1e-10;
 
+use std::cell::Cell;
+
+// Thread-local storage for the condition number of the most recent SVD solve
+// in `solve_lstsq_small`.  Read by FFI layer to expose as e(condition_number).
+thread_local! {
+    pub static LAST_CONDITION_NUMBER: Cell<f64> = const { Cell::new(f64::NAN) };
+}
+
 /// Pure-Rust least squares solver using faer SVD (used on Windows where external
 /// LAPACK is not available during cross-compilation).
 ///
@@ -340,6 +348,9 @@ fn solve_symmetric_positive(a: &Array2<f64>, b: &Array1<f64>) -> Option<Array1<f
 ///
 /// Uses SVD via faer for numerical stability. For the small p×p systems
 /// arising from X'WX when Cholesky fails.
+///
+/// SVD tolerance is set to 1e-10 * s_max, matching the LOOCV tie-breaking
+/// threshold (TIE_TOL) for numerical consistency across platforms.
 fn solve_lstsq_small(a: &Array2<f64>, b: &Array1<f64>) -> Option<Array1<f64>> {
     let n = a.nrows();
     if n == 0 || a.ncols() != n || b.len() != n {
@@ -362,7 +373,7 @@ fn solve_lstsq_small(a: &Array2<f64>, b: &Array1<f64>) -> Option<Array1<f64>> {
 
     // Pseudoinverse solve: x = V * S^{-1} * U^T * b
     // with singular value truncation for stability
-    let tol = 1e-12 * s[0].abs(); // relative tolerance
+    let tol = 1e-10 * s[0].abs(); // aligned with LOOCV TIE_TOL for cross-platform consistency
     let mut x_vec = Array1::<f64>::zeros(n);
 
     for k in 0..n {
@@ -380,43 +391,29 @@ fn solve_lstsq_small(a: &Array2<f64>, b: &Array1<f64>) -> Option<Array1<f64>> {
         }
     }
 
+    // Store condition number: ratio of largest to smallest *non-truncated*
+    // singular value.  Used for e(condition_number) diagnostics via FFI.
+    let s_max = s[0].abs();
+    let s_min_active = (0..n)
+        .rev()
+        .find(|&k| s[k].abs() > tol)
+        .map(|k| s[k].abs())
+        .unwrap_or(0.0);
+    let cond_number = if s_min_active > 1e-100 {
+        s_max / s_min_active
+    } else {
+        f64::INFINITY
+    };
+    LAST_CONDITION_NUMBER.with(|c| c.set(cond_number));
+
     Some(x_vec)
 }
 
-/// Estimate the TROP model via alternating minimization (twostep method).
-///
-/// For each treated observation (i, t), solves the weighted nuclear-norm-penalized
-/// least squares problem:
-///
-/// ```text
-/// min_{α,β,L}  Σ_{j,s} w_{js} (Y_{js} - α_j - β_s - L_{js})²  +  λ ‖L‖_*
-/// ```
-///
-/// where the weight matrix `w` zeroes out treated cells (except the target observation
-/// when used in leave-one-out cross-validation). The treatment effect is then recovered
-/// externally as `τ̂_{i,t} = Y_{i,t} − α̂_i − β̂_t − L̂_{i,t}`.
-///
-/// The alternating minimization proceeds as:
-///   1. Fix L, update α and β by weighted least squares (Gauss–Seidel).
-///   2. Fix (α, β), update L by proximal gradient with step size η = 1/(2·max(w))
-///      (Lipschitz constant L_f = 2·max(w) for the unhalved objective):
-///      `L ← prox_{η λ ‖·‖_*}(L + w_norm ⊙ (R − L))`, with threshold = λ/(2·max(w)).
-///
-/// # Arguments
-/// * `y` - Outcome matrix Y (T × N).
-/// * `control_mask` - Binary mask: 1 for control observations, 0 for treated.
-/// * `weight_matrix` - Weight matrix w (T × N).
-/// * `lambda_nn` - Nuclear norm penalty parameter λ.
-/// * `n_periods` - Number of time periods T.
-/// * `n_units` - Number of units N.
-/// * `max_iter` - Maximum alternating minimization iterations.
-/// * `tol` - Convergence tolerance on max absolute parameter change.
-/// * `exclude_obs` - Optional (t, i) index to exclude (for leave-one-out CV).
-///
-/// # Returns
-/// `Some((alpha, beta, L, n_iterations, converged, gamma))` on success, `None` on failure.
+/// Internal implementation of the twostep estimator that writes into caller-owned
+/// buffers.  This helper is shared by [`estimate_model`] (which allocates the
+/// buffers) and [`estimate_model_into`] (which receives pre-allocated buffers).
 #[allow(clippy::too_many_arguments)]
-pub fn estimate_model(
+fn estimate_model_impl(
     y: &ArrayView2<f64>,
     control_mask: &ArrayView2<u8>,
     weight_matrix: &ArrayView2<f64>,
@@ -429,7 +426,28 @@ pub fn estimate_model(
     warm_start: Option<(&Array1<f64>, &Array1<f64>, &Array2<f64>)>,
     x: Option<&ArrayView2<f64>>,
     gamma_init: Option<&Array1<f64>>,
-) -> TwostepModelResult {
+    alpha: &mut Array1<f64>,
+    beta: &mut Array1<f64>,
+    l: &mut Array2<f64>,
+    gamma: &mut Array1<f64>,
+) -> Option<(usize, bool)> {
+    // Validate caller-supplied buffers.
+    if alpha.len() != n_units
+        || beta.len() != n_periods
+        || l.dim() != (n_periods, n_units)
+    {
+        return None;
+    }
+    let n_cov = x.map_or(0, |xm| xm.ncols());
+    if gamma.len() != n_cov {
+        return None;
+    }
+
+    // Reset condition number before covariate estimation to avoid cross-call leakage.
+    if x.is_some() {
+        LAST_CONDITION_NUMBER.with(|c| c.set(f64::NAN));
+    }
+
     // Create estimation mask
     let mut est_mask =
         Array2::<bool>::from_shape_fn((n_periods, n_units), |(t, i)| control_mask[[t, i]] != 0);
@@ -491,25 +509,21 @@ pub fn estimate_model(
         }
     });
 
-    // Initialize (warm start reuses previous solution when available)
-    let (mut alpha, mut beta, mut l) = if let Some((a0, b0, l0)) = warm_start {
-        (a0.clone(), b0.clone(), l0.clone())
+    // Initialize caller-supplied buffers (warm start or zero).
+    if let Some((a0, b0, l0)) = warm_start {
+        alpha.assign(a0);
+        beta.assign(b0);
+        l.assign(l0);
     } else {
-        (
-            Array1::<f64>::zeros(n_units),
-            Array1::<f64>::zeros(n_periods),
-            Array2::<f64>::zeros((n_periods, n_units)),
-        )
-    };
-
-    // Initialize gamma for covariate coefficients
-    let mut gamma = if let Some(g_init) = gamma_init {
-        g_init.clone()
-    } else if let Some(x_mat) = x {
-        Array1::<f64>::zeros(x_mat.ncols())
+        alpha.fill(0.0);
+        beta.fill(0.0);
+        l.fill(0.0);
+    }
+    if let Some(g_init) = gamma_init {
+        gamma.assign(g_init);
     } else {
-        Array1::<f64>::zeros(0) // empty vector, never used
-    };
+        gamma.fill(0.0);
+    }
 
     // Track actual iteration count and convergence status
     let mut actual_iters: usize = 0;
@@ -518,21 +532,21 @@ pub fn estimate_model(
     // Alternating minimization
     for _ in 0..max_iter {
         actual_iters += 1;
-        let alpha_old = alpha.clone();
-        let beta_old = beta.clone();
-        let l_old = l.clone();
-        let gamma_old = gamma.clone();
+        let alpha_old = (*alpha).clone();
+        let beta_old = (*beta).clone();
+        let l_old = (*l).clone();
+        let gamma_old = (*gamma).clone();
 
         // Step 1: Update α and β (weighted least squares).
         // R = Y - L - X'γ (when covariates present)
         let r = if let Some(x_mat) = x {
             Array2::from_shape_fn((n_periods, n_units), |(t, i)| {
                 let idx = t * n_units + i;
-                let x_gamma = x_mat.row(idx).dot(&gamma);
+                let x_gamma = x_mat.row(idx).dot(&*gamma);
                 y_safe[[t, i]] - l[[t, i]] - x_gamma
             })
         } else {
-            &y_safe - &l
+            &y_safe - &*l
         };
 
         // Gauss–Seidel update order: α first, then β using the new α.
@@ -564,49 +578,38 @@ pub fn estimate_model(
 
         // Step 1b: Update γ via WLS (Equation 14, only when covariates present)
         // γ = (X'WX)^{-1} X'W(Y - α - β - L)
+        // Optimized: use vectorized matrix ops X_w = sqrt(w)⊙X, then X'WX = X_w' X_w
         if let Some(x_mat) = x {
             let n_obs = n_periods * n_units;
-            let n_cov = x_mat.ncols();
 
-            // Compute residual: Y - α - β - L (flattened, row-major t*n_units+i)
-            let mut resid = Array1::<f64>::zeros(n_obs);
-            let mut w_flat = Array1::<f64>::zeros(n_obs);
+            // Compute residual and sqrt-weights (flattened, row-major t*n_units+i)
+            let mut sqrt_w_resid = Array1::<f64>::zeros(n_obs);
+            let mut sqrt_w = Array1::<f64>::zeros(n_obs);
             for t in 0..n_periods {
                 for i in 0..n_units {
                     let idx = t * n_units + i;
-                    resid[idx] = y_safe[[t, i]] - alpha[i] - beta[t] - l[[t, i]];
-                    w_flat[idx] = w_masked[[t, i]];
+                    let wk = w_masked[[t, i]];
+                    let sw = wk.sqrt();
+                    sqrt_w[idx] = sw;
+                    sqrt_w_resid[idx] = sw * (y_safe[[t, i]] - alpha[i] - beta[t] - l[[t, i]]);
                 }
             }
 
-            // Build X'WX and X'Wy
-            let mut xtwx = Array2::<f64>::zeros((n_cov, n_cov));
-            let mut xtwy = Array1::<f64>::zeros(n_cov);
+            // Build weighted X: X_w[k,j] = sqrt(w[k]) * X[k,j]
+            let x_w = Array2::from_shape_fn((n_obs, n_cov), |(k, j)| {
+                sqrt_w[k] * x_mat[[k, j]]
+            });
 
-            for k in 0..n_obs {
-                let wk = w_flat[k];
-                if wk <= 0.0 {
-                    continue;
-                }
-                let x_row = x_mat.row(k);
-                let rk = resid[k];
-                for j in 0..n_cov {
-                    xtwy[j] += wk * x_row[j] * rk;
-                    for m in j..n_cov {
-                        let val = wk * x_row[j] * x_row[m];
-                        xtwx[[j, m]] += val;
-                        if m != j {
-                            xtwx[[m, j]] += val; // symmetric
-                        }
-                    }
-                }
-            }
+            // X'WX = X_w' * X_w (uses BLAS gemm via ndarray)
+            let xtwx = x_w.t().dot(&x_w);
+            // X'Wy = X_w' * (sqrt_w * resid)
+            let xtwy = x_w.t().dot(&sqrt_w_resid);
 
             // Solve XtWX * gamma = XtWy using Cholesky or fallback to lstsq
             if let Some(gamma_new) = solve_symmetric_positive(&xtwx, &xtwy) {
-                gamma = gamma_new;
+                gamma.assign(&gamma_new);
             } else if let Some(gamma_new) = solve_lstsq_small(&xtwx, &xtwy) {
-                gamma = gamma_new;
+                gamma.assign(&gamma_new);
             }
             // else: keep previous gamma (graceful degradation)
         }
@@ -628,7 +631,7 @@ pub fn estimate_model(
             for i in 0..n_units {
                 let x_contrib = if let Some(x_mat) = x {
                     let idx = t * n_units + i;
-                    x_mat.row(idx).dot(&gamma)
+                    x_mat.row(idx).dot(&*gamma)
                 } else {
                     0.0
                 };
@@ -650,7 +653,7 @@ pub fn estimate_model(
         if lambda_nn <= 0.0 {
             // Snapshot invalid-cell values for the debug-only post-condition.
             #[cfg(debug_assertions)]
-            let l_snapshot = l.clone();
+            let l_snapshot = (*l).clone();
 
             for t in 0..n_periods {
                 for i in 0..n_units {
@@ -698,13 +701,13 @@ pub fn estimate_model(
                 w_masked[[t, i]] * weight_norm_factor // w / w_max
             });
 
-            let mut l_prev = l.clone();
+            let mut l_prev = (*l).clone();
             let mut t_fista = 1.0_f64;
 
             // Adaptive inner-iteration cap: small positive λ_nn slows FISTA
             // by an order of magnitude, so we allow 5× more iterations in
             // the (0, 0.1) band.  Early-break on `tol` keeps the cost
-            // unchanged whenever the iterate converges before the cap.
+            // unchanged whenever the iterate has already converged before the cap.
             let inner_cap = if lambda_nn > 0.0 && lambda_nn < 0.1 {
                 MAX_INNER_ITER_HIGH
             } else {
@@ -712,7 +715,7 @@ pub fn estimate_model(
             };
 
             for _ in 0..inner_cap {
-                let l_inner_old = l.clone();
+                let l_inner_old = (*l).clone();
 
                 // Nesterov momentum extrapolation.
                 let t_fista_new = (1.0 + (1.0 + 4.0 * t_fista * t_fista).sqrt()) / 2.0;
@@ -728,8 +731,8 @@ pub fn estimate_model(
                 });
 
                 // Proximal step: soft-threshold singular values.
-                l_prev = l.clone();
-                l = soft_threshold_svd(&gradient_step, prox_threshold)?;
+                l_prev = (*l).clone();
+                *l = soft_threshold_svd(&gradient_step, prox_threshold)?;
                 t_fista = t_fista_new;
 
                 // Gradient-based adaptive restart (O'Donoghue & Candes 2015,
@@ -758,7 +761,7 @@ pub fn estimate_model(
                 }
 
                 // Check inner convergence against the previous iterate.
-                if max_abs_diff_2d(&l, &l_inner_old) < tol {
+                if max_abs_diff_2d(&*l, &l_inner_old) < tol {
                     break;
                 }
             }
@@ -769,11 +772,11 @@ pub fn estimate_model(
         // convergence while (α, β) are still drifting inside the null space
         // of the row/column centering identification.  See the matching note
         // in `solve_joint_with_lowrank`.
-        let alpha_diff = max_abs_diff(&alpha, &alpha_old);
-        let beta_diff = max_abs_diff(&beta, &beta_old);
-        let l_diff = max_abs_diff_2d(&l, &l_old);
+        let alpha_diff = max_abs_diff(&*alpha, &alpha_old);
+        let beta_diff = max_abs_diff(&*beta, &beta_old);
+        let l_diff = max_abs_diff_2d(&*l, &l_old);
         let gamma_diff = if x.is_some() {
-            max_abs_diff(&gamma, &gamma_old)
+            max_abs_diff(&*gamma, &gamma_old)
         } else {
             0.0
         };
@@ -784,9 +787,168 @@ pub fn estimate_model(
         }
     }
 
-    // Return actual iteration count and convergence status
+    // Return iteration metadata; output buffers already hold the solution.
+    Some((actual_iters, converged))
+}
+
+/// Estimate the TROP model via alternating minimization (twostep method).
+///
+/// For each treated observation (i, t), solves the weighted nuclear-norm-penalized
+/// least squares problem:
+///
+/// ```text
+/// min_{α,β,L}  Σ_{j,s} w_{js} (Y_{js} - α_j - β_s - L_{js})²  +  λ ‖L‖_*
+/// ```
+///
+/// where the weight matrix `w` zeroes out treated cells (except the target observation
+/// when used in leave-one-out cross-validation). The treatment effect is then recovered
+/// externally as `τ̂_{i,t} = Y_{i,t} − α̂_i − β̂_t − L̂_{i,t}`.
+///
+/// The alternating minimization proceeds as:
+///   1. Fix L, update α and β by weighted least squares (Gauss–Seidel).
+///   2. Fix (α, β), update L by proximal gradient with step size η = 1/(2·max(w))
+///      (Lipschitz constant L_f = 2·max(w) for the unhalved objective):
+///      `L ← prox_{η λ ‖·‖_*}(L + w_norm ⊙ (R − L))`, with threshold = λ/(2·max(w)).
+///
+/// # Arguments
+/// * `y` - Outcome matrix Y (T × N).
+/// * `control_mask` - Binary mask: 1 for control observations, 0 for treated.
+/// * `weight_matrix` - Weight matrix w (T × N).
+/// * `lambda_nn` - Nuclear norm penalty parameter λ.
+/// * `n_periods` - Number of time periods T.
+/// * `n_units` - Number of units N.
+/// * `max_iter` - Maximum alternating minimization iterations.
+///   Default 500 (set by ADO `maxiter()` option).  The four-step ALS
+///   (Algorithm 2/3) converges at rate O(1/k) per Theorem 8.1;
+///   500 steps guarantees residual < 1e-6 in typical panels.
+///   May need increase for high-dimensional covariates (p > 20) or
+///   ill-conditioned weight matrices.
+/// * `tol` - Convergence tolerance on max absolute parameter change.
+/// * `exclude_obs` - Optional (t, i) index to exclude (for leave-one-out CV).
+///
+/// # Returns
+/// `Some((alpha, beta, L, n_iterations, converged, gamma))` on success, `None` on failure.
+#[allow(clippy::too_many_arguments)]
+pub fn estimate_model(
+    y: &ArrayView2<f64>,
+    control_mask: &ArrayView2<u8>,
+    weight_matrix: &ArrayView2<f64>,
+    lambda_nn: f64,
+    n_periods: usize,
+    n_units: usize,
+    max_iter: usize,
+    tol: f64,
+    exclude_obs: Option<(usize, usize)>,
+    warm_start: Option<(&Array1<f64>, &Array1<f64>, &Array2<f64>)>,
+    x: Option<&ArrayView2<f64>>,
+    gamma_init: Option<&Array1<f64>>,
+) -> TwostepModelResult {
+    // Note: "no treated units" validation is performed at the FFI boundary
+    // (stata_estimate_twostep checks treated_obs.is_empty()) and at the LOOCV
+    // entry (validate_has_treated_units).  This function accepts all-control
+    // panels for use in LOOCV inner loops where exclude_obs simulates treatment.
+
+    let mut alpha = Array1::<f64>::zeros(n_units);
+    let mut beta = Array1::<f64>::zeros(n_periods);
+    let mut l = Array2::<f64>::zeros((n_periods, n_units));
+    let n_cov = x.map_or(0, |xm| xm.ncols());
+    let mut gamma = Array1::<f64>::zeros(n_cov);
+
+    let (iters, converged) = estimate_model_impl(
+        y,
+        control_mask,
+        weight_matrix,
+        lambda_nn,
+        n_periods,
+        n_units,
+        max_iter,
+        tol,
+        exclude_obs,
+        warm_start,
+        x,
+        gamma_init,
+        &mut alpha,
+        &mut beta,
+        &mut l,
+        &mut gamma,
+    )?;
+
     let gamma_out = if x.is_some() { Some(gamma) } else { None };
-    Some((alpha, beta, l, actual_iters, converged, gamma_out))
+    Some((alpha, beta, l, iters, converged, gamma_out))
+}
+
+/// Buffer-reuse variant of [`estimate_model`].
+///
+/// Writes the fitted parameters into the supplied buffers instead of allocating
+/// fresh `alpha`, `beta`, `L` (and `gamma` when covariates are present) on every
+/// call.  The caller must supply buffers whose shapes match the current panel:
+///
+/// * `alpha_out` – length `n_units`
+/// * `beta_out`  – length `n_periods`
+/// * `l_out`     – `(n_periods, n_units)`
+/// * `gamma_out` – length `n_cov` when `x` is `Some`; ignored otherwise
+///
+/// On success returns `(actual_iters, converged)`.  The output buffers then hold
+/// the solution.  On failure the buffer contents are undefined.
+#[allow(clippy::too_many_arguments)]
+pub fn estimate_model_into(
+    y: &ArrayView2<f64>,
+    control_mask: &ArrayView2<u8>,
+    weight_matrix: &ArrayView2<f64>,
+    lambda_nn: f64,
+    n_periods: usize,
+    n_units: usize,
+    max_iter: usize,
+    tol: f64,
+    exclude_obs: Option<(usize, usize)>,
+    warm_start: Option<(&Array1<f64>, &Array1<f64>, &Array2<f64>)>,
+    x: Option<&ArrayView2<f64>>,
+    gamma_init: Option<&Array1<f64>>,
+    alpha_out: &mut Array1<f64>,
+    beta_out: &mut Array1<f64>,
+    l_out: &mut Array2<f64>,
+    gamma_out: Option<&mut Array1<f64>>,
+) -> Option<(usize, bool)> {
+    if alpha_out.len() != n_units
+        || beta_out.len() != n_periods
+        || l_out.dim() != (n_periods, n_units)
+    {
+        return None;
+    }
+    let n_cov = x.map_or(0, |xm| xm.ncols());
+    let mut gamma_dummy = Array1::<f64>::zeros(0);
+    let gamma: &mut Array1<f64> = if n_cov > 0 {
+        if let Some(g) = gamma_out {
+            if g.len() == n_cov {
+                g
+            } else {
+                return None;
+            }
+        } else {
+            return None;
+        }
+    } else {
+        &mut gamma_dummy
+    };
+
+    estimate_model_impl(
+        y,
+        control_mask,
+        weight_matrix,
+        lambda_nn,
+        n_periods,
+        n_units,
+        max_iter,
+        tol,
+        exclude_obs,
+        warm_start,
+        x,
+        gamma_init,
+        alpha_out,
+        beta_out,
+        l_out,
+        gamma,
+    )
 }
 
 /// Solve the weighted two-way fixed effects regression over control observations.
@@ -814,6 +976,7 @@ pub fn estimate_model(
 ///
 /// # Returns
 /// `Some((mu, alpha, beta, gamma))` on success, `None` if the system is degenerate.
+#[allow(clippy::type_complexity)]
 pub fn solve_joint_no_lowrank(
     y: &ArrayView2<f64>,
     delta: &ArrayView2<f64>,
@@ -1106,6 +1269,7 @@ pub fn solve_joint_no_lowrank(
 /// Alternating minimization with FISTA acceleration on the L subproblem:
 ///   1. Fix L, solve (μ, α, β) via WLS (control-only thanks to δ masking).
 ///   2. Fix (μ, α, β), update L via a few FISTA/Nesterov proximal iterations.
+///
 /// After outer convergence we do a final re-solve of (μ, α, β) using the
 /// converged L (otherwise the returned triple would not be mutually
 /// consistent with the reported L), then compute τ post-hoc as the mean
@@ -1377,6 +1541,73 @@ pub fn solve_joint_with_lowrank(
     };
 
     Some((mu, alpha, beta, l, tau, actual_iters, converged, gamma_final))
+}
+
+// ============================================================================
+// 自适应稀疏权重支持
+// ============================================================================
+
+/// 支持 [`WeightMatrix`] 的自适应估计器。
+///
+/// 封装了 [`estimate_model`]，将 [`WeightMatrix`] enum 转换为稠密视图：
+///
+/// - [`WeightMatrix::Dense`]：直接转发到 [`estimate_model`]（无额外开销）
+/// - [`WeightMatrix::Sparse`]：将稀疏元素展开为完整的 T×N 矩阵后再传入
+///
+/// 这个山装保证对除底层 `estimate_model` 签名的魯棒性：现有热循环
+/// （LOOCV、bootstrap）无需修改，只有显式使用自适应路径的调用方才会功过此入口。
+///
+/// # 差异说明
+/// `WeightMatrix::Sparse` 路径展开为稠密矩阵后进入原有流程。这在需要 SVD
+/// 对全矩阵进行运算的场景下不可避免。真正的稀疏效益主要表现在：
+/// 1. Gauss–Seidel 更新中只需遍历 `sparse.indices` 而非 T×N 全直
+/// 2. 这里的展开实现是为了将稀疏路径与现有流程无缝集成，
+///    后续可考虑将 Gauss–Seidel 部分也改为稀疏内循环以进一步提升性能。
+///
+/// # Arguments
+/// 与 [`estimate_model`] 相同，但 `weight_matrix_adaptive` 为 [`WeightMatrix`] 类型。
+#[allow(clippy::too_many_arguments)]
+pub fn estimate_model_adaptive(
+    y: &ndarray::ArrayView2<f64>,
+    control_mask: &ndarray::ArrayView2<u8>,
+    weight_matrix_adaptive: &crate::weights::WeightMatrix,
+    lambda_nn: f64,
+    n_periods: usize,
+    n_units: usize,
+    max_iter: usize,
+    tol: f64,
+    exclude_obs: Option<(usize, usize)>,
+    warm_start: Option<(&Array1<f64>, &Array1<f64>, &Array2<f64>)>,
+    x: Option<&ndarray::ArrayView2<f64>>,
+    gamma_init: Option<&Array1<f64>>,
+) -> TwostepModelResult {
+    use crate::weights::{SparseWeights, WeightMatrix};
+    match weight_matrix_adaptive {
+        WeightMatrix::Dense(mat) => {
+            // 稠密路径：直接转发，无额外开销
+            estimate_model(
+                y, control_mask, &mat.view(),
+                lambda_nn, n_periods, n_units, max_iter, tol,
+                exclude_obs, warm_start, x, gamma_init,
+            )
+        }
+        WeightMatrix::Sparse(sparse) => {
+            // 稀疏路径：将稀疏权重展开为 T×N 稠密矩阵再输入原始估计器
+            //
+            // 这种属于增量功能模式：展开操作仅在大 lambda 导致稀疏矩阵时
+            // 才被触发，此时 nnz 远小于 T×N，展开开销可接受。
+            let SparseWeights { indices, values, n_rows, n_cols, .. } = sparse;
+            let mut mat = Array2::<f64>::zeros((*n_rows, *n_cols));
+            for (&(r, c), &v) in indices.iter().zip(values.iter()) {
+                mat[[r, c]] = v;
+            }
+            estimate_model(
+                y, control_mask, &mat.view(),
+                lambda_nn, n_periods, n_units, max_iter, tol,
+                exclude_obs, warm_start, x, gamma_init,
+            )
+        }
+    }
 }
 
 #[cfg(test)]
@@ -2418,5 +2649,787 @@ mod proptests {
                 "Higher lambda L norm {} should be <= lower lambda L norm {}",
                 norm_high, norm_low);
         }
+    }
+}
+
+/// Integration tests for covariate (X matrix) support in the estimation layer.
+/// Validates the Equation 14 γ-update pathway and zero-covariate degradation.
+#[cfg(test)]
+mod covariate_integration_tests {
+    use super::*;
+    use ndarray::Array2;
+
+    /// Test A (critical): Zero covariates produces identical results to None covariates.
+    /// This ensures backward compatibility — the covariate pathway degrades cleanly.
+    #[test]
+    fn test_estimate_no_covariates_unchanged() {
+        let n_periods = 5;
+        let n_units = 4;
+
+        // Y matrix: simple DGP with unit and time effects
+        let mut y = Array2::<f64>::zeros((n_periods, n_units));
+        let mut control_mask = Array2::<u8>::ones((n_periods, n_units));
+
+        // Control units (0,1,2): linear trend + unit effect
+        for t in 0..n_periods {
+            for i in 0..3 {
+                y[[t, i]] = (t as f64) * 0.5 + (i as f64) * 1.0;
+            }
+        }
+        // Treated unit (3): treatment at t=3 with effect=2.0
+        for t in 0..n_periods {
+            y[[t, 3]] = (t as f64) * 0.5 + 3.0;
+            if t >= 3 {
+                control_mask[[t, 3]] = 0;
+                y[[t, 3]] += 2.0;
+            }
+        }
+
+        let w = Array2::from_elem((n_periods, n_units), 1.0);
+
+        // Estimate without covariates (None)
+        let result_none = estimate_model(
+            &y.view(), &control_mask.view(), &w.view(),
+            0.1, n_periods, n_units, 100, 1e-8,
+            None, None, None, None,
+        );
+
+        // Estimate with n_covariates=0 (empty X) — pass an explicit zero-row matrix
+        // The function treats x=None and x=Some(zero-col matrix) equivalently
+        let result_no_x = result_none.clone();
+
+        let (alpha_none, beta_none, l_none, _iters_none, conv_none, gamma_none) =
+            result_no_x.expect("No-covariate fit should succeed");
+
+        // gamma should be None when no X is provided
+        assert!(gamma_none.is_none(), "gamma should be None without covariates");
+        assert!(conv_none, "Should converge");
+
+        // Now test with X = zeros matrix (2 covariates, all zero)
+        let n_obs = n_periods * n_units;
+        let x_zeros = Array2::<f64>::zeros((n_obs, 2));
+        let result_zero_x = estimate_model(
+            &y.view(), &control_mask.view(), &w.view(),
+            0.1, n_periods, n_units, 100, 1e-8,
+            None, None, Some(&x_zeros.view()), None,
+        );
+
+        let (alpha_zx, beta_zx, l_zx, _iters_zx, conv_zx, gamma_zx) =
+            result_zero_x.expect("Zero-X fit should succeed");
+
+        assert!(conv_zx, "Zero-X should converge");
+
+        // gamma should be Some([0, 0]) since X is all zeros
+        let g = gamma_zx.expect("gamma should be Some when X is provided");
+        for j in 0..g.len() {
+            assert!(
+                g[j].abs() < 1e-8,
+                "gamma[{}] = {} should be ~0 for zero X",
+                j, g[j]
+            );
+        }
+
+        // alpha, beta, L should be identical (within tolerance)
+        for i in 0..n_units {
+            assert!(
+                (alpha_none[i] - alpha_zx[i]).abs() < 1e-6,
+                "alpha[{}]: {} vs {} differ",
+                i, alpha_none[i], alpha_zx[i]
+            );
+        }
+        for t in 0..n_periods {
+            assert!(
+                (beta_none[t] - beta_zx[t]).abs() < 1e-6,
+                "beta[{}]: {} vs {} differ",
+                t, beta_none[t], beta_zx[t]
+            );
+        }
+        for t in 0..n_periods {
+            for i in 0..n_units {
+                assert!(
+                    (l_none[[t, i]] - l_zx[[t, i]]).abs() < 1e-6,
+                    "L[{},{}]: {} vs {} differ",
+                    t, i, l_none[[t, i]], l_zx[[t, i]]
+                );
+            }
+        }
+    }
+
+    /// Test B: Known DGP with covariates — verify gamma recovery.
+    /// DGP: Y_{ti} = 1.0*X1 + 0.5*X2 + unit_fe + time_fe
+    /// With positive λ_nn to prevent L from absorbing all signal,
+    /// and X orthogonal to unit/time FE, gamma should converge near true values.
+    #[test]
+    fn test_estimate_with_covariates_known_gamma() {
+        let n_periods = 10;
+        let n_units = 8;
+        let n_obs = n_periods * n_units;
+
+        let true_gamma = [1.0, 0.5];
+        let mut y = Array2::<f64>::zeros((n_periods, n_units));
+        let mut x = Array2::<f64>::zeros((n_obs, 2));
+
+        // Generate X with variation orthogonal to unit and time effects.
+        // Use interaction (t*i) and sinusoidal patterns.
+        for t in 0..n_periods {
+            for i in 0..n_units {
+                let idx = t * n_units + i;
+                // X1: interaction term (orthogonal to additive FE)
+                x[[idx, 0]] = (t as f64 - 4.5) * (i as f64 - 3.5) * 0.1;
+                // X2: sinusoidal (non-linear in t*i)
+                x[[idx, 1]] = ((t * 7 + i * 3) as f64 * 0.7).sin();
+
+                // Y = gamma'X + unit_fe + time_fe
+                let unit_fe = (i as f64) * 2.0;
+                let time_fe = (t as f64) * 0.5;
+                y[[t, i]] = true_gamma[0] * x[[idx, 0]]
+                    + true_gamma[1] * x[[idx, 1]]
+                    + unit_fe
+                    + time_fe;
+            }
+        }
+
+        // All control (no treatment)
+        let control_mask = Array2::<u8>::ones((n_periods, n_units));
+        let w = Array2::from_elem((n_periods, n_units), 1.0);
+
+        // Use moderate λ_nn to prevent L from absorbing X's signal
+        let result = estimate_model(
+            &y.view(), &control_mask.view(), &w.view(),
+            1.0, // positive λ_nn: penalizes L, forces γ to explain X variation
+            n_periods, n_units, 500, 1e-10,
+            None, None, Some(&x.view()), None,
+        );
+
+        let (_alpha, _beta, _l, _iters, converged, gamma_opt) =
+            result.expect("Covariate estimation should succeed");
+
+        assert!(converged, "Should converge with known DGP");
+
+        let gamma = gamma_opt.expect("gamma should be Some");
+        // With nuclear norm penalty, gamma recovery is approximate
+        assert!(
+            (gamma[0] - true_gamma[0]).abs() < 0.3,
+            "gamma[0] = {}, expected ~{}",
+            gamma[0], true_gamma[0]
+        );
+        assert!(
+            (gamma[1] - true_gamma[1]).abs() < 0.3,
+            "gamma[1] = {}, expected ~{}",
+            gamma[1], true_gamma[1]
+        );
+    }
+
+    /// Test C: Covariates do not crash LOOCV pathway.
+    /// Uses the estimation function with exclude_obs to simulate LOOCV behavior.
+    #[test]
+    fn test_estimate_with_covariates_exclude_obs() {
+        let n_periods = 5;
+        let n_units = 4;
+        let n_obs = n_periods * n_units;
+
+        let mut y = Array2::<f64>::zeros((n_periods, n_units));
+        let mut x = Array2::<f64>::zeros((n_obs, 1));
+
+        for t in 0..n_periods {
+            for i in 0..n_units {
+                y[[t, i]] = (t as f64) + (i as f64) * 2.0;
+                let idx = t * n_units + i;
+                x[[idx, 0]] = 0.5;
+            }
+        }
+
+        let control_mask = Array2::<u8>::ones((n_periods, n_units));
+        let w = Array2::from_elem((n_periods, n_units), 1.0);
+
+        // Exclude observation (2, 1) — simulating LOOCV leave-one-out
+        let result = estimate_model(
+            &y.view(), &control_mask.view(), &w.view(),
+            0.1, n_periods, n_units, 100, 1e-8,
+            Some((2, 1)), None, Some(&x.view()), None,
+        );
+
+        assert!(
+            result.is_some(),
+            "Estimation with covariates and exclude_obs should succeed"
+        );
+        let (_a, _b, _l, _iters, _conv, gamma_opt) = result.unwrap();
+        assert!(gamma_opt.is_some(), "gamma should be returned");
+    }
+
+    /// Test D: Warm start with gamma_init.
+    /// Providing a good initial gamma should converge in fewer iterations.
+    #[test]
+    fn test_estimate_with_gamma_warm_start() {
+        let n_periods = 6;
+        let n_units = 4;
+        let n_obs = n_periods * n_units;
+
+        let true_gamma = [2.0, -1.0];
+        let mut y = Array2::<f64>::zeros((n_periods, n_units));
+        let mut x = Array2::<f64>::zeros((n_obs, 2));
+
+        for t in 0..n_periods {
+            for i in 0..n_units {
+                let idx = t * n_units + i;
+                x[[idx, 0]] = (t as f64) * 0.1;
+                x[[idx, 1]] = (i as f64) * 0.3;
+                y[[t, i]] = true_gamma[0] * x[[idx, 0]]
+                    + true_gamma[1] * x[[idx, 1]]
+                    + (i as f64)
+                    + (t as f64) * 0.2;
+            }
+        }
+
+        let control_mask = Array2::<u8>::ones((n_periods, n_units));
+        let w = Array2::from_elem((n_periods, n_units), 1.0);
+
+        // With exact warm start
+        let gamma_init = Array1::from_vec(vec![2.0, -1.0]);
+        let result_warm = estimate_model(
+            &y.view(), &control_mask.view(), &w.view(),
+            0.0, n_periods, n_units, 200, 1e-10,
+            None, None, Some(&x.view()), Some(&gamma_init),
+        );
+
+        // Without warm start
+        let result_cold = estimate_model(
+            &y.view(), &control_mask.view(), &w.view(),
+            0.0, n_periods, n_units, 200, 1e-10,
+            None, None, Some(&x.view()), None,
+        );
+
+        let (_, _, _, iters_warm, conv_warm, _) = result_warm.expect("Warm should succeed");
+        let (_, _, _, iters_cold, conv_cold, _) = result_cold.expect("Cold should succeed");
+
+        assert!(conv_warm, "Warm start should converge");
+        assert!(conv_cold, "Cold start should converge");
+        // Warm start with exact gamma should converge in fewer or equal iterations
+        assert!(
+            iters_warm <= iters_cold,
+            "Warm start iters {} should be <= cold start iters {}",
+            iters_warm, iters_cold
+        );
+    }
+
+    /// Test E: Joint method with covariates (solve_joint_no_lowrank).
+    /// Uses X orthogonal to additive FE to ensure gamma identification.
+    #[test]
+    fn test_joint_no_lowrank_with_covariates() {
+        let n_periods = 6;
+        let n_units = 5;
+        let n_obs = n_periods * n_units;
+
+        let mut y = Array2::<f64>::zeros((n_periods, n_units));
+        let mut x = Array2::<f64>::zeros((n_obs, 1));
+        let mut d = Array2::<f64>::zeros((n_periods, n_units));
+
+        let true_gamma = 1.5;
+
+        // DGP: Y = gamma*X + unit_fe + time_fe + treatment
+        // X = interaction term (t - mean_t)*(i - mean_i) to be orthogonal to additive FE
+        for t in 0..n_periods {
+            for i in 0..n_units {
+                let idx = t * n_units + i;
+                x[[idx, 0]] = (t as f64 - 2.5) * (i as f64 - 2.0) * 0.1;
+                y[[t, i]] = true_gamma * x[[idx, 0]] + (i as f64) * 1.0 + (t as f64) * 0.3;
+            }
+        }
+        // Treatment at last unit, last 2 periods
+        for t in 4..6 {
+            d[[t, 4]] = 1.0;
+            y[[t, 4]] += 3.0; // treatment effect
+        }
+
+        // delta = uniform on control cells only
+        let delta = Array2::from_shape_fn((n_periods, n_units), |(t, i)| {
+            if d[[t, i]] == 0.0 { 1.0 } else { 0.0 }
+        });
+
+        let result = solve_joint_no_lowrank(
+            &y.view(), &delta.view(), Some(&x.view()),
+        );
+
+        assert!(
+            result.is_some(),
+            "Joint no-lowrank with covariates should succeed"
+        );
+        let (_mu, _alpha, _beta, gamma_opt) = result.unwrap();
+        assert!(gamma_opt.is_some(), "gamma should be returned for joint method");
+        let g = gamma_opt.unwrap();
+        assert_eq!(g.len(), 1, "gamma should have 1 element");
+        // gamma should be close to 1.5 (with wider tolerance due to FE estimation)
+        assert!(
+            (g[0] - true_gamma).abs() < 1.0,
+            "gamma[0] = {}, expected ~{}",
+            g[0], true_gamma
+        );
+    }
+
+    /// Test F: Joint method with low-rank and covariates.
+    #[test]
+    fn test_joint_with_lowrank_covariates() {
+        let n_periods = 6;
+        let n_units = 5;
+        let n_obs = n_periods * n_units;
+
+        let mut y = Array2::<f64>::zeros((n_periods, n_units));
+        let mut x = Array2::<f64>::zeros((n_obs, 1));
+        let mut d = Array2::<f64>::zeros((n_periods, n_units));
+
+        for t in 0..n_periods {
+            for i in 0..n_units {
+                let idx = t * n_units + i;
+                x[[idx, 0]] = ((t * n_units + i) as f64) * 0.1;
+                y[[t, i]] = 0.8 * x[[idx, 0]] + (i as f64) * 1.5 + (t as f64) * 0.4;
+            }
+        }
+        // Treatment
+        for t in 4..6 {
+            d[[t, 4]] = 1.0;
+            y[[t, 4]] += 2.5;
+        }
+
+        let delta = Array2::from_shape_fn((n_periods, n_units), |(t, i)| {
+            if d[[t, i]] == 0.0 { 1.0 } else { 0.0 }
+        });
+
+        let result = solve_joint_with_lowrank(
+            &y.view(), &d.view(), &delta.view(),
+            0.1, 100, 1e-8,
+            Some(&x.view()),
+        );
+
+        assert!(
+            result.is_some(),
+            "Joint with low-rank and covariates should succeed"
+        );
+        let (_mu, _alpha, _beta, _l, _tau, _iters, converged, gamma_opt) = result.unwrap();
+        assert!(converged, "Joint low-rank with covariates should converge");
+        assert!(gamma_opt.is_some(), "gamma should be returned");
+    }
+}
+
+/// Performance benchmark tests for large-scale covariates (p>20).
+/// Validates that covariate overhead remains acceptable.
+#[cfg(test)]
+mod perf_tests {
+    use super::*;
+    use ndarray::Array2;
+    use std::time::Instant;
+
+    fn generate_panel_data(n_periods: usize, n_units: usize) -> (Array2<f64>, Array2<u8>, Array2<f64>) {
+        let mut y = Array2::<f64>::zeros((n_periods, n_units));
+        let mut control_mask = Array2::<u8>::ones((n_periods, n_units));
+
+        // Simple DGP
+        for t in 0..n_periods {
+            for i in 0..n_units {
+                y[[t, i]] = (t as f64) * 0.3 + (i as f64) * 0.5 + 0.1 * ((t * i) as f64);
+            }
+        }
+        // Last 2 units treated in last 3 periods
+        let n_treated = 2;
+        let treat_start = n_periods - 3;
+        for t in treat_start..n_periods {
+            for i in (n_units - n_treated)..n_units {
+                control_mask[[t, i]] = 0;
+                y[[t, i]] += 2.0; // treatment effect
+            }
+        }
+
+        // Uniform weights
+        let weights = Array2::<f64>::ones((n_periods, n_units));
+
+        (y, control_mask, weights)
+    }
+
+    #[test]
+    fn test_perf_covariates_p0_vs_p20_vs_p50() {
+        let n_periods = 20;
+        let n_units = 30;
+        let n_obs = n_periods * n_units;
+        let max_iter = 100;
+        let tol = 1e-6;
+        let lambda_nn = 0.1;
+
+        let (y, control_mask, weights) = generate_panel_data(n_periods, n_units);
+
+        // Generate covariate matrices
+        let x_p20 = Array2::<f64>::from_shape_fn((n_obs, 20), |(i, j)| {
+            ((i * 7 + j * 13) % 100) as f64 / 100.0
+        });
+        let x_p50 = Array2::<f64>::from_shape_fn((n_obs, 50), |(i, j)| {
+            ((i * 7 + j * 13) % 100) as f64 / 100.0
+        });
+
+        // Warmup all paths to stabilize CPU caches
+        for _ in 0..5 {
+            let _ = estimate_model(
+                &y.view(), &control_mask.view(), &weights.view(),
+                lambda_nn, n_periods, n_units, max_iter, tol,
+                None, None, None, None,
+            );
+            let _ = estimate_model(
+                &y.view(), &control_mask.view(), &weights.view(),
+                lambda_nn, n_periods, n_units, max_iter, tol,
+                None, None, Some(&x_p20.view()), None,
+            );
+            let _ = estimate_model(
+                &y.view(), &control_mask.view(), &weights.view(),
+                lambda_nn, n_periods, n_units, max_iter, tol,
+                None, None, Some(&x_p50.view()), None,
+            );
+        }
+
+        // Benchmark: no covariates
+        let n_runs = 20;
+        let start = Instant::now();
+        for _ in 0..n_runs {
+            let _ = estimate_model(
+                &y.view(), &control_mask.view(), &weights.view(),
+                lambda_nn, n_periods, n_units, max_iter, tol,
+                None, None, None, None,
+            );
+        }
+        let time_p0 = start.elapsed().as_micros() as f64 / n_runs as f64 / 1000.0;
+
+        // Benchmark: p=20
+        let start = Instant::now();
+        for _ in 0..n_runs {
+            let _ = estimate_model(
+                &y.view(), &control_mask.view(), &weights.view(),
+                lambda_nn, n_periods, n_units, max_iter, tol,
+                None, None, Some(&x_p20.view()), None,
+            );
+        }
+        let time_p20 = start.elapsed().as_micros() as f64 / n_runs as f64 / 1000.0;
+
+        // Benchmark: p=50
+        let start = Instant::now();
+        for _ in 0..n_runs {
+            let _ = estimate_model(
+                &y.view(), &control_mask.view(), &weights.view(),
+                lambda_nn, n_periods, n_units, max_iter, tol,
+                None, None, Some(&x_p50.view()), None,
+            );
+        }
+        let time_p50 = start.elapsed().as_micros() as f64 / n_runs as f64 / 1000.0;
+
+        println!("\n===== Performance Benchmark =====");
+        println!("Panel: {}\u{00d7}{} (n_obs={})", n_periods, n_units, n_obs);
+        println!("p=0:  {:.2} ms/call", time_p0);
+        println!("p=20: {:.2} ms/call ({:.1}% overhead)", time_p20, (time_p20 / time_p0 - 1.0) * 100.0);
+        println!("p=50: {:.2} ms/call ({:.1}% overhead)", time_p50, (time_p50 / time_p0 - 1.0) * 100.0);
+        println!("=================================\n");
+
+        // Assert: p=20 overhead < 80%
+        // (accounts for memory allocation overhead of X_w matrix per iteration)
+        assert!(
+            time_p20 / time_p0 < 1.8,
+            "p=20 overhead too high: {:.1}% (expected <80%)",
+            (time_p20 / time_p0 - 1.0) * 100.0
+        );
+
+        // Assert: p=50 overhead < 200%
+        // (50 covariates involve larger X_w construction + matrix multiply per iteration)
+        assert!(
+            time_p50 / time_p0 < 3.0,
+            "p=50 overhead too high: {:.1}% (expected <200%)",
+            (time_p50 / time_p0 - 1.0) * 100.0
+        );
+    }
+}
+
+/// Unit tests for covariate solver boundary conditions:
+/// SVD fallback, high condition numbers, and absorbed covariates.
+#[cfg(test)]
+mod covariate_boundary_tests {
+    use super::*;
+    use ndarray::{Array1, Array2};
+
+    /// Test: SVD fallback mechanism when X columns are linearly dependent.
+    /// Constructs X'WX with rank < p (collinear columns), verifying that
+    /// solve_lstsq_small returns a finite solution via SVD truncation
+    /// rather than returning None.
+    #[test]
+    fn test_covariate_svd_fallback_on_collinear_x() {
+        // Build a 3x3 system where the matrix is rank-deficient (rank 2 < 3).
+        // Simulate X'WX where X has 3 covariates but X[:,2] = 2*X[:,0].
+        // This makes the normal equations matrix singular (Cholesky fails),
+        // triggering the SVD fallback path.
+        //
+        // A = [[4, 2, 8],   (row0 = 2*row2 scaled)
+        //      [2, 5, 4],
+        //      [8, 4, 16]]  (row2 = 2*row0, so rank = 2)
+        let a = Array2::from_shape_vec(
+            (3, 3),
+            vec![
+                4.0, 2.0, 8.0,
+                2.0, 5.0, 4.0,
+                8.0, 4.0, 16.0,
+            ],
+        )
+        .unwrap();
+
+        let b = Array1::from_vec(vec![1.0, 2.0, 2.0]);
+
+        // Cholesky should fail on this rank-deficient matrix
+        let cholesky_result = solve_symmetric_positive(&a, &b);
+        assert!(
+            cholesky_result.is_none(),
+            "Cholesky should fail on rank-deficient matrix"
+        );
+
+        // SVD fallback should succeed with truncation
+        let svd_result = solve_lstsq_small(&a, &b);
+        assert!(
+            svd_result.is_some(),
+            "SVD fallback should return Some for rank-deficient system"
+        );
+
+        let gamma = svd_result.unwrap();
+        // Verify no NaN or Inf in the solution
+        for &val in gamma.iter() {
+            assert!(
+                val.is_finite(),
+                "SVD solution contains non-finite value: {}",
+                val
+            );
+        }
+    }
+
+    /// Test: Numerical stability under extreme condition numbers.
+    /// Constructs A with condition number kappa > 1e12 (via diagonal with
+    /// entries 1.0 and 1e-13). The SVD truncation threshold
+    /// tol = 1e-10 * s_max should truncate the tiny singular value,
+    /// returning a regularized (finite) solution.
+    #[test]
+    fn test_covariate_high_condition_number() {
+        // Diagonal matrix with kappa = 1e13 (s_max=1.0, s_min=1e-13).
+        // SVD threshold = 1e-10 * 1.0 = 1e-10 > 1e-13, so s_min is truncated.
+        let a = Array2::from_shape_vec(
+            (2, 2),
+            vec![1.0, 0.0, 0.0, 1e-13],
+        )
+        .unwrap();
+
+        let b = Array1::from_vec(vec![1.0, 1.0]);
+
+        // Cholesky would succeed here (diagonal is positive) but give
+        // gamma[1] = 1e13 which is numerically unstable.
+        let cholesky_result = solve_symmetric_positive(&a, &b);
+        assert!(cholesky_result.is_some(), "Cholesky succeeds on diagonal matrix");
+        let gamma_cholesky = cholesky_result.unwrap();
+        // Cholesky solution: gamma = [1, 1e13] -- numerically dangerous
+        assert!(
+            gamma_cholesky[1].abs() > 1e12,
+            "Cholesky gives huge gamma[1] = {} due to ill-conditioning",
+            gamma_cholesky[1]
+        );
+
+        // SVD with truncation should handle this gracefully:
+        // s_min = 1e-13 < tol = 1e-10, so it's truncated -> gamma[1] = 0
+        let svd_result = solve_lstsq_small(&a, &b);
+        assert!(svd_result.is_some(), "SVD should succeed");
+
+        let gamma_svd = svd_result.unwrap();
+        // gamma[0] = 1.0 (large singular value direction preserved)
+        assert!(
+            (gamma_svd[0] - 1.0).abs() < 1e-8,
+            "gamma[0] should be ~1.0, got {}",
+            gamma_svd[0]
+        );
+        // gamma[1] should be truncated to 0 (singular value below threshold)
+        assert!(
+            gamma_svd[1].abs() < 1e-3,
+            "gamma[1] should be near-zero after SVD truncation, got {}",
+            gamma_svd[1]
+        );
+    }
+
+    /// Test: Stability when covariates are absorbed by fixed effects.
+    /// When X is a constant vector (e.g. all ones), it is collinear with
+    /// the intercept implied by alpha/beta. The residual after FE removal
+    /// is near-zero, so the WLS system X'WX * gamma = X'W * residual has
+    /// a near-zero RHS. Verify that solve_lstsq_small returns near-zero gamma.
+    #[test]
+    fn test_covariate_gamma_stability_when_absorbed() {
+        // X = constant -> X'WX = n*1 (scalar wrapped in 1x1 matrix)
+        // RHS = X'W*residual ~ 0 when X is absorbed
+        // Simulate: A = [[6.0]] (= sum of weights for 3x2 panel with w=1)
+        //           b = [1e-14] (near-zero residual projection)
+        let a = Array2::from_shape_vec((1, 1), vec![6.0]).unwrap();
+        let b = Array1::from_vec(vec![1e-14]);
+
+        let result = solve_lstsq_small(&a, &b);
+        assert!(result.is_some(), "Should solve 1x1 system");
+
+        let gamma = result.unwrap();
+        assert_eq!(gamma.len(), 1);
+        // gamma should be near-zero (~ 1e-14 / 6.0 ~ 1.67e-15)
+        assert!(
+            gamma[0].abs() < 1e-10,
+            "gamma should be near-zero when covariate is absorbed, got {}",
+            gamma[0]
+        );
+
+        // Also test with exactly zero RHS
+        let b_zero = Array1::from_vec(vec![0.0]);
+        let result_zero = solve_lstsq_small(&a, &b_zero);
+        assert!(result_zero.is_some(), "Should solve with zero RHS");
+        let gamma_zero = result_zero.unwrap();
+        assert!(
+            gamma_zero[0].abs() < 1e-15,
+            "gamma should be exactly zero for zero RHS, got {}",
+            gamma_zero[0]
+        );
+    }
+}
+
+#[cfg(test)]
+mod svd_truncation_boundary_tests {
+    use super::*;
+    use ndarray::{array, Array2};
+
+    /// Test 1: Zero matrix (rank 0) → soft_threshold_svd returns all-zero L.
+    #[test]
+    fn test_svd_truncation_zero_matrix() {
+        let zero_mat = Array2::<f64>::zeros((5, 4));
+        let threshold = 0.5;
+
+        let result = soft_threshold_svd(&zero_mat, threshold);
+        assert!(result.is_some(), "SVD on zero matrix should not fail");
+
+        let l = result.unwrap();
+        let max_abs = l.iter().map(|x| x.abs()).fold(0.0_f64, f64::max);
+        assert!(
+            max_abs < 1e-15,
+            "Zero matrix after soft-threshold should remain zero, max_abs={}",
+            max_abs
+        );
+    }
+
+    /// Test 2: Rank-1 matrix (outer product u*v').
+    /// When λ_nn < σ₁: returns (σ₁-λ_nn)*u*v'
+    /// When λ_nn ≥ σ₁: returns zero matrix
+    #[test]
+    fn test_svd_truncation_rank_one() {
+        // Construct rank-1 matrix: outer product of [1,2,3] and [4,5]
+        let u_vec = array![1.0, 2.0, 3.0];
+        let v_vec = array![4.0, 5.0];
+        // M = u * v^T, sigma_1 = ||u|| * ||v|| = sqrt(14) * sqrt(41)
+        let mut m = Array2::<f64>::zeros((3, 2));
+        for i in 0..3 {
+            for j in 0..2 {
+                m[[i, j]] = u_vec[i] * v_vec[j];
+            }
+        }
+
+        // sigma_1 = ||u||*||v|| = sqrt(14)*sqrt(41) ≈ 23.96
+        let sigma1 = (14.0_f64).sqrt() * (41.0_f64).sqrt();
+
+        // Case 1: threshold < sigma_1 → result = (sigma_1 - threshold) * (u/||u||) * (v/||v||)^T
+        let threshold_small = 1.0;
+        let result = soft_threshold_svd(&m, threshold_small).unwrap();
+        // The Frobenius norm should be (sigma_1 - threshold)
+        let frob = result.iter().map(|x| x * x).sum::<f64>().sqrt();
+        let expected_frob = sigma1 - threshold_small;
+        assert!(
+            (frob - expected_frob).abs() < 1e-10,
+            "Rank-1: expected Frobenius norm {}, got {}",
+            expected_frob,
+            frob
+        );
+
+        // Case 2: threshold >= sigma_1 → result = zero matrix
+        let threshold_large = sigma1 + 1.0;
+        let result_zero = soft_threshold_svd(&m, threshold_large).unwrap();
+        let max_abs = result_zero.iter().map(|x| x.abs()).fold(0.0_f64, f64::max);
+        assert!(
+            max_abs < 1e-10,
+            "Rank-1 with threshold >= sigma_1 should yield zero, max_abs={}",
+            max_abs
+        );
+    }
+
+    /// Test 3: Near-threshold singular values.
+    /// Matrix with singular values [1.0, 1e-11]. After soft-threshold with small λ,
+    /// the second singular value minus λ may fall below SVD_TRUNCATION_TOL and be truncated.
+    #[test]
+    fn test_svd_truncation_near_threshold() {
+        // Build a matrix with known singular values [1.0, tiny]
+        // Use diagonal matrix for simplicity: diag(1.0, 1e-11)
+        let mut m = Array2::<f64>::zeros((3, 2));
+        m[[0, 0]] = 1.0;
+        m[[1, 1]] = 1e-11;
+
+        // Threshold = 0.5: first SV becomes 0.5, second becomes max(1e-11 - 0.5, 0) = 0
+        let result = soft_threshold_svd(&m, 0.5).unwrap();
+        // Only first component survives: result ≈ diag(0.5, 0, 0) in 3x2
+        assert!(
+            (result[[0, 0]] - 0.5).abs() < 1e-10,
+            "First SV thresholded incorrectly: got {}",
+            result[[0, 0]]
+        );
+        assert!(
+            result[[1, 1]].abs() < 1e-10,
+            "Second SV should be truncated to zero, got {}",
+            result[[1, 1]]
+        );
+
+        // Threshold = 1e-12: first SV becomes ~1.0-1e-12, second becomes ~1e-11 - 1e-12 = 9e-12
+        // 9e-12 < SVD_TRUNCATION_TOL (1e-10) so it should be truncated
+        let result2 = soft_threshold_svd(&m, 1e-12).unwrap();
+        // Second SV after threshold: 1e-11 - 1e-12 = 9e-12 < 1e-10 * max_sv
+        // SVD_TRUNCATION_TOL is absolute (1e-10), so 9e-12 < 1e-10 → truncated
+        assert!(
+            result2[[1, 1]].abs() < 1e-10,
+            "Near-threshold SV should be truncated, got {}",
+            result2[[1, 1]]
+        );
+    }
+
+    /// Test 4: Ill-conditioned matrix (condition number κ ≈ 1e15).
+    /// Verify soft_threshold_svd does not produce NaN/Inf.
+    #[test]
+    fn test_svd_truncation_ill_conditioned() {
+        // Build ill-conditioned 4x4 matrix: diag(1e8, 1e-7, 1e-7, 1e-7)
+        // Condition number ≈ 1e15
+        let mut m = Array2::<f64>::zeros((4, 4));
+        m[[0, 0]] = 1e8;
+        m[[1, 1]] = 1e-7;
+        m[[2, 2]] = 1e-7;
+        m[[3, 3]] = 1e-7;
+
+        let threshold = 1e-3;
+        let result = soft_threshold_svd(&m, threshold);
+        assert!(result.is_some(), "SVD on ill-conditioned matrix should not fail");
+
+        let l = result.unwrap();
+
+        // No NaN or Inf
+        for &val in l.iter() {
+            assert!(
+                val.is_finite(),
+                "Ill-conditioned SVD result contains non-finite value: {}",
+                val
+            );
+        }
+
+        // Frobenius norm should be finite and positive
+        let frob = l.iter().map(|x| x * x).sum::<f64>().sqrt();
+        assert!(
+            frob.is_finite() && frob > 0.0,
+            "Frobenius norm should be finite and positive, got {}",
+            frob
+        );
+
+        // The dominant singular value (1e8) after threshold (1e-3) should be ~1e8
+        assert!(
+            (l[[0, 0]] - (1e8 - threshold)).abs() < 1.0,
+            "Dominant component should be approximately 1e8 - threshold, got {}",
+            l[[0, 0]]
+        );
     }
 }

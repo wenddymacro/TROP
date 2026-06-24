@@ -1,8 +1,18 @@
 #!/bin/bash
 # Build script for TROP Stata plugin
 # Builds: Rust core library, C plugin, and optionally Mata library (ltrop.mlib)
+#
+# Usage:
+#   ./build.sh          - Build native plugin (macOS/Linux)
+#   ./build.sh --linux  - Cross-compile Linux x64 plugin via Docker
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# --linux flag: cross-compile for Linux x64 using Docker
+if [[ "${1:-}" == "--linux" ]]; then
+    echo "=== Cross-compiling for Linux x64 (Docker) ==="
+    exec bash "$SCRIPT_DIR/cross-build-linux.sh"
+fi
 
 echo "=== Building Rust library ==="
 cd "$SCRIPT_DIR/rust"

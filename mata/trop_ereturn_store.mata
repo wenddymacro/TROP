@@ -25,6 +25,7 @@
     _trop_safe_read_scalar()            safe scalar reader
     _trop_lambda_nn_user_face()         1e10 (internal +inf sentinel) -> .
     _trop_display_warnings()            estimation diagnostic messages
+    _trop_display_conv_diagnostics()  convergence health check + suggestions
     _trop_compute_effective_rank()      SVD-based effective rank
     _trop_display_bootstrap_warnings()  bootstrap diagnostic messages
     _trop_store_lambda_grids()          LOOCV grid and CV curve storage
@@ -403,6 +404,22 @@ void trop_store_results(string scalar method)
     /* ── lambda grids and CV curve ───────────────────────────────────── */
     _trop_store_lambda_grids(lambda_time, lambda_unit, lambda_nn, loocv_score)
 
+    /* ── LOOCV RMSE (root mean squared pseudo-treatment-effect) ────────
+       RMSE = sqrt(Q(lambda_hat) / n_valid) measures the cross-validation
+       prediction error; smaller values indicate better out-of-sample fit.
+       Not defined when LOOCV was not performed (e.g. fixedlambda mode). */
+    if (loocv_score < . & loocv_n_valid < . & loocv_n_valid > 0) {
+        st_numscalar("e(loocv_rmse)", sqrt(loocv_score / loocv_n_valid))
+    }
+
+    /* ── LOOCV failure rate ────────────────────────────────────────────
+       Fraction of grid-point evaluations that did not converge during
+       the LOOCV search; mirrors e(bootstrap_fail_rate) above. */
+    if (loocv_n_attempted < . & loocv_n_attempted > 0 & loocv_n_valid < .) {
+        st_numscalar("e(loocv_fail_rate)",
+                     (loocv_n_attempted - loocv_n_valid) / loocv_n_attempted)
+    }
+
     /* ── method-specific storage ─────────────────────────────────────── */
     /* n_treated_units was already read above for the df reference
        distribution; only expose it on e() here. */
@@ -481,9 +498,47 @@ void trop_store_results(string scalar method)
        without reconstructing the ordering. */
     _trop_build_tau_matrix(n_periods, n_units)
 
+    /* ── covariate coefficients (gamma) ──────────────────────────────
+       When covariates are present, the plugin writes the fitted gamma
+       vector into __trop_gamma (1 x p row vector).  Store as e(gamma)
+       and record p as e(n_covariates).  When p = 0 (no covariates),
+       skip so e(gamma) remains undefined and consumers can branch on
+       `missing(e(n_covariates))` or `e(n_covariates) == 0`. */
+    {
+        real scalar _p_cov
+        real matrix _gamma_mat
+        _p_cov = _trop_safe_read_scalar("__trop_n_covariates")
+        if (_p_cov < . & _p_cov > 0) {
+            st_numscalar("e(n_covariates)", _p_cov)
+            _gamma_mat = st_matrix("__trop_gamma")
+            if (cols(_gamma_mat) >= _p_cov) {
+                st_matrix("e(gamma)", _gamma_mat)
+            }
+        }
+        else {
+            st_numscalar("e(n_covariates)", 0)
+        }
+    }
+
+    /* ── condition number of covariate X'WX system ──────────────────
+       kappa(X'WX) = s_max/s_min of the SVD used in gamma estimation.
+       Large values (>1e8) indicate near-collinearity among covariates
+       and potential numerical instability in gamma. */
+    {
+        real scalar _cond_num
+        _cond_num = _trop_safe_read_scalar("__trop_condition_number")
+        if (_cond_num < . & _cond_num > 0) {
+            st_numscalar("e(condition_number)", _cond_num)
+        }
+    }
+
     /* ── diagnostic warnings ─────────────────────────────────────────── */
     _trop_display_warnings(loocv_n_valid, loocv_n_attempted,
         converged, n_iterations, method, n_obs_estimated, n_obs_failed)
+
+    /* ── convergence diagnostics with actionable suggestions ──────────── */
+    _trop_display_conv_diagnostics(
+        loocv_n_valid, loocv_n_attempted, converged, n_iterations)
 
     if (bootstrap_reps > 0 && n_bootstrap_valid < bootstrap_reps) {
         _trop_display_bootstrap_warnings(n_bootstrap_valid, bootstrap_reps)
@@ -492,6 +547,16 @@ void trop_store_results(string scalar method)
     /* ── command metadata ────────────────────────────────────────────── */
     st_global("e(title)", "TROP Estimator")
     st_global("e(predict)", "trop_p")
+
+    /* ── specification string ───────────────────────────────────────────
+       Records the estimation call parameters for reproducibility. */
+    {
+        string scalar spec_str
+        spec_str = st_global("__trop_spec_string")
+        if (spec_str != "") {
+            st_global("e(spec_string)", spec_str)
+        }
+    }
 
     /* ── semantics of nuisance parameters (alpha/beta/factor_matrix) ─
        Under method(twostep), each treated cell (i,t) has its own
@@ -614,6 +679,78 @@ void _trop_display_warnings(
             printf("{res}Warning: Estimation did not converge (iterations=%g){txt}\n", n_iterations)
         }
         printf("{res}         Results may be unreliable.{txt}\n")
+    }
+}
+
+/*──────────────────────────────────────────────────────────────────────────────
+  _trop_display_conv_diagnostics
+
+  Post-estimation convergence health check.  Inspects the LOOCV failure
+  rate and final-estimation convergence flag, and prints actionable
+  suggestions when problems are detected.
+
+  This function is complementary to check_loocv_fail_rate() (which runs
+  earlier, before estimation starts, at a 5 % threshold) and the basic
+  convergence warning in _trop_display_warnings().  Here we apply a
+  10 % threshold for the LOOCV failure rate (stricter messaging) and
+  provide explicit user-facing remedies.
+
+  Theoretical context:
+    - The alternating minimisation (alpha -> beta -> gamma -> L cycle,
+      Algorithm 1-2) is guaranteed monotone but convergence speed depends
+      on the condition number of the loss Hessian.
+    - A high LOOCV failure rate means many lambda combinations on the
+      grid did not produce a converged fit; the selected lambda_hat may
+      lie off of Q(lambda)'s true argmin (paper Eq. 5).
+    - Reaching max iterations without convergence means the reported ATT
+      is evaluated at a non-stationary point.
+
+  Arguments
+    loocv_n_valid      successful LOOCV fits
+    loocv_n_attempted  attempted LOOCV fits
+    converged          convergence flag (1 = converged, 0 = not)
+    n_iterations       final iteration count
+──────────────────────────────────────────────────────────────────────────────*/
+
+void _trop_display_conv_diagnostics(
+    real scalar loocv_n_valid,
+    real scalar loocv_n_attempted,
+    real scalar converged,
+    real scalar n_iterations
+)
+{
+    real scalar fail_rate
+
+    /* ── LOOCV failure rate check (threshold: 10%) ────────────────────── */
+    fail_rate = .
+    if (loocv_n_attempted < . & loocv_n_attempted > 0 &
+        loocv_n_valid < .) {
+        fail_rate = (loocv_n_attempted - loocv_n_valid) / loocv_n_attempted
+    }
+
+    if (fail_rate < . & fail_rate > 0.10) {
+        displayas("err")
+        printf("{err}Warning: LOOCV convergence rate is low (%.1f%% of grid points failed){txt}\n",
+               fail_rate * 100)
+        displayas("txt")
+        printf("  Suggestions:\n")
+        printf("    1) Try grid_style(extended) to widen the lambda search range\n")
+        printf("    2) Check data for extreme outliers or collinearity\n")
+        printf("    3) Consider increasing tol() to relax convergence tolerance\n")
+    }
+
+    /* ── Max-iteration-reached check ──────────────────────────────────── */
+    if (converged < . & converged == 0 &
+        n_iterations < . & n_iterations > 0) {
+        displayas("err")
+        printf("{err}Warning: Estimation reached the maximum iteration limit (%g){txt}\n",
+               n_iterations)
+        displayas("txt")
+        printf("  Suggestions:\n")
+        printf("    1) Increase maxiter() option (current limit: %g)\n",
+               n_iterations)
+        printf("    2) Relax convergence tolerance with tol()\n")
+        printf("    3) Check data conditioning; near-collinear panels slow convergence\n")
     }
 }
 

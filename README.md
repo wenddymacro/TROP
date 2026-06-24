@@ -4,7 +4,7 @@
 
 [![Stata 17+](https://img.shields.io/badge/Stata-17%2B-blue.svg)](https://www.stata.com/)
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](LICENSE)
-[![Version: 1.0.0](https://img.shields.io/badge/Version-1.0.0-green.svg)]()
+[![Version: 1.2.0](https://img.shields.io/badge/Version-1.2.0-green.svg)]()
 [![Build](https://github.com/gorgeousfish/TROP/actions/workflows/build-plugins.yml/badge.svg)](https://github.com/gorgeousfish/TROP/actions/workflows/build-plugins.yml)
 ![Platforms](https://img.shields.io/badge/platforms-macOS%20|%20Windows-blue)
 
@@ -35,7 +35,9 @@ In semi-synthetic simulations calibrated to seven real datasets (Table 1 of the 
 - **Leave-One-Out Cross-Validation** — Data-driven selection of tuning parameters via coordinate-cycling LOOCV (Algorithm 1)
 - **Bootstrap Inference** — Stratified unit block bootstrap for variance estimation and confidence intervals (Algorithm 3)
 - **General Assignment Patterns** — Handles staggered adoption, switching treatments, and arbitrary binary treatment matrices
-- **Post-Estimation Diagnostics** — 8 `estat` subcommands (including a triple-robustness bias decomposition) and 8 `predict` types for comprehensive analysis
+- **Post-Estimation Diagnostics** — 13 `estat` subcommands (including triple-robustness bias decomposition, event-study, pre-trend test, and table export) and 11 `predict` types for comprehensive analysis
+- **Covariate Adjustment** — Time-invariant covariates X_i'γ (paper Section 6.2 Eq. 14) with automatic WLS projection
+- **Survey Design Support** — Stratification, PSU clustering, and FPC via Rao-Wu rescaled bootstrap
 - **High-Performance Backend** — Core computation in Rust via compiled plugin; no external dependencies
 
 ## Key Concepts
@@ -417,8 +419,8 @@ Post-estimation (available after `trop`):
 
 | Command          | Description                                       |
 | ---------------- | ------------------------------------------------- |
-| `estat`          | Diagnostics dispatcher (8 subcommands; see below) |
-| `predict`        | Prediction dispatcher (8 types; see below)        |
+| `estat`          | Diagnostics dispatcher (13 subcommands; see below) |
+| `predict`        | Prediction dispatcher (11 types; see below)       |
 
 ## Options
 
@@ -436,13 +438,13 @@ Post-estimation (available after `trop`):
 | Option                       | Description                                                     | Default    |
 | ---------------------------- | --------------------------------------------------------------- | ---------- |
 | `method(string)`             | Estimation method: `twostep` / `joint` (or aliases `local` / `global`) | `twostep`  |
-| `grid_style(string)`         | Lambda grid style: `default` or `extended`                      | `default`  |
+| `grid_style(string)`         | Lambda grid style: `default`, `fine`, or `extended`             | `default`  |
 | `lambda_time_grid(numlist)`  | User-specified grid for lambda_time                             | auto       |
 | `lambda_unit_grid(numlist)`  | User-specified grid for lambda_unit                             | auto       |
 | `lambda_nn_grid(numlist)`    | User-specified grid for lambda_nn                               | auto       |
 | `fixedlambda(numlist)`       | Fix (lambda_time lambda_unit lambda_nn); skip LOOCV             | —          |
 | `tol(real)`                  | Convergence tolerance for iterative estimation                  | `1e-6`     |
-| `maxiter(integer)`           | Maximum number of iterations                                    | `100`      |
+| `maxiter(integer)`           | Maximum number of iterations                                    | `500`      |
 | `bootstrap(integer)`         | Number of bootstrap replications (0 = skip inference)           | `200`      |
 | `bsvariance(string)`         | Bootstrap variance denominator: `sample` (1/(B-1)) or `paper` (1/B, Alg 3) | `sample`   |
 | `cimethod(string)`           | Primary confidence interval: `percentile` (Alg 3 step 6), `t`, or `normal` | `percentile` if `bootstrap > 0`, else `t` |
@@ -452,15 +454,28 @@ Post-estimation (available after `trop`):
 
 **Grid styles:**
 - `default` — 6 × 6 × 5 = 180 grid combinations, 17 evaluations per coordinate-descent cycle
-- `extended` — 14 × 16 × 18 = 4,032 combinations, 48 evaluations per cycle (finer search, slower)
+- `fine` — 7 × 7 × 7 = 343 combinations, 21 evaluations per cycle (intermediate resolution)
+- `extended` — 14 × 16 × 19 = 4,256 combinations, 49 evaluations per cycle (finer search, slower; includes DID/TWFE corner)
+
+| `covariates(varlist)`        | Time-invariant covariates for X_i'γ adjustment (paper Section 6.2 Eq. 14) | —          |
+| `twostep_loocv(string)`      | Twostep LOOCV strategy: `cycling` (default) or `exhaustive`    | `cycling`  |
+| `joint_loocv(string)`        | Joint LOOCV strategy: `cycling` (default) or `exhaustive`      | `cycling`  |
+| `vlevel(integer)`            | Verbosity level (-1 to 3); -1 suppresses all output            | `-1`       |
+| `singleunit(string)`         | Single-PSU stratum handling: `certainty`, `scaled`, `centered` | `certainty`|
+| `strata(varname)`            | Stratification variable for Rao-Wu bootstrap                   | —          |
+| `psu(varname)`               | Primary sampling unit variable                                  | —          |
+| `fpc(varname)`               | Finite population correction variable                           | —          |
+| `nest`                       | Declare PSUs nested within strata                              | off        |
+| `notiming`                   | Suppress elapsed-time display                                   | off        |
 
 **Grid notes:**
 - `lambda_time_grid()` and `lambda_unit_grid()` must be finite, non-negative
   numlists; Stata missing (`.`) is rejected at parse time.
 - `lambda_nn_grid()` and the third slot of `fixedlambda()` accept `.` as
-  +infinity (DID/TWFE corner, L ≡ 0).  The default grid includes this
-  corner so LOOCV can select the "no factor structure" regime (classical
-  DID / synthetic control) when it minimises Q(λ).
+  +infinity (DID/TWFE corner, L ≡ 0).  The `default` grid does **not**
+  include this corner; use `grid_style(extended)` or add `.` to a custom
+  `lambda_nn_grid()` to let LOOCV select the "no factor structure" regime
+  (classical DID / synthetic control).
 
 ### trop_bootstrap Options
 
@@ -469,7 +484,7 @@ Post-estimation (available after `trop`):
 | `nreps(integer)`    | Number of bootstrap replications                                | `1000`     |
 | `level(real)`       | Confidence level in percent (10–99.99)                          | `c(level)` |
 | `seed(integer)`     | Random number generator seed                                    | `42`       |
-| `maxiter(integer)`  | Maximum iterations per replication                              | `100`      |
+| `maxiter(integer)`  | Maximum iterations per replication                              | `500`      |
 | `tol(real)`         | Convergence tolerance per replication                           | `1e-6`     |
 | `verbose`           | Display progress information                                    | off        |
 
@@ -567,6 +582,17 @@ enabled, so downstream code can switch `cimethod()` without re-estimating.
 | `e(effective_rank)`       | Effective rank of factor matrix         |
 | `e(n_bootstrap_valid)`    | Number of valid bootstrap replications  |
 | `e(data_validated)`       | Data validation indicator (1/0)         |
+| `e(loocv_rmse)`           | LOOCV RMSE = sqrt(Q(lambda_hat) / n_valid) |
+| `e(condition_number)`     | WLS design matrix condition number         |
+| `e(bootstrap_fail_rate)`  | Bootstrap failure rate (0 to 1)            |
+| `e(n_covariates)`         | Number of covariates (0 if none)           |
+| `e(deff_weights)`         | Kish design effect of pweights             |
+
+| `e(loocv_rmse)`            | LOOCV RMSE = sqrt(Q(lambda_hat) / n_valid) |
+| `e(condition_number)`       | WLS design matrix condition number         |
+| `e(bootstrap_fail_rate)`    | Bootstrap failure rate (0 to 1)            |
+| `e(n_covariates)`           | Number of covariates (0 if none)           |
+| `e(deff_weights)`           | Kish design effect of pweights             |
 
 ### Macros
 
@@ -575,7 +601,7 @@ enabled, so downstream code can switch `cimethod()` without re-estimating.
 | `e(cmd)`               | `"trop"`                                 |
 | `e(cmdline)`           | Full command line as issued              |
 | `e(method)`            | `"twostep"` or `"joint"`                |
-| `e(grid_style)`        | `"default"`, `"extended"`, or `"custom"` |
+| `e(grid_style)`        | `"default"`, `"fine"`, `"extended"`, or `"custom"` |
 | `e(depvar)`            | Dependent variable name                  |
 | `e(treatvar)`          | Treatment variable name                  |
 | `e(panelvar)`          | Panel variable name                      |
@@ -585,6 +611,23 @@ enabled, so downstream code can switch `cimethod()` without re-estimating.
 | `e(cimethod)`          | Primary CI method: `percentile`, `t`, or `normal`; `"percentile->t"` on downgrade |
 | `e(estat_cmd)`         | `"trop_estat"`                           |
 | `e(treatment_pattern)` | Treatment assignment pattern description |
+| `e(twostep_loocv)`     | Twostep LOOCV strategy: `cycling` or `exhaustive` |
+| `e(joint_loocv)`       | Joint LOOCV strategy: `cycling` or `exhaustive`   |
+| `e(covariates)`        | Space-separated covariate variable names  |
+| `e(spec_string)`       | Specification string for reproducibility  |
+| `e(strata_var)`        | Stratification variable (survey only)     |
+| `e(psu_var)`           | PSU variable (survey only)                |
+| `e(fpc_var)`           | FPC variable (survey only)                |
+| `e(bootstrap_type)`    | Bootstrap type: `standard` or `rao_wu`    |
+
+| `e(twostep_loocv)`       | Twostep LOOCV strategy: `cycling` or `exhaustive` |
+| `e(joint_loocv)`         | Joint LOOCV strategy: `cycling` or `exhaustive`   |
+| `e(covariates)`          | Space-separated covariate variable names  |
+| `e(spec_string)`         | Specification string for reproducibility  |
+| `e(strata_var)`          | Stratification variable (survey only)     |
+| `e(psu_var)`             | PSU variable (survey only)                |
+| `e(fpc_var)`             | FPC variable (survey only)                |
+| `e(bootstrap_type)`      | Bootstrap type: `standard` or `rao_wu`    |
 
 ### Matrices
 
@@ -607,6 +650,12 @@ enabled, so downstream code can switch `cimethod()` without re-estimating.
 | `e(lambda_time_grid)`    | Lambda time grid values                              |
 | `e(lambda_unit_grid)`    | Lambda unit grid values                              |
 | `e(lambda_nn_grid)`      | Lambda nuclear norm grid values                      |
+| `e(gamma)`               | Covariate coefficients (1×p; only with `covariates()`) |
+| `e(lambda_grid)`         | Cartesian product of lambda grids (K×3)               |
+| `e(cv_curve)`            | LOOCV scores at grid points (K×4)                    |
+| `e(gamma)`               | Covariate coefficients (1×p; only with `covariates()`) |
+| `e(lambda_grid)`         | Cartesian product of lambda grids (K×3)               |
+| `e(cv_curve)`            | LOOCV scores at grid points (K×4)                    |
 
 ## Post-Estimation
 
@@ -622,21 +671,29 @@ enabled, so downstream code can switch `cimethod()` without re-estimating.
 | `estat loocv`       |              | LOOCV hyperparameter selection diagnostics |
 | `estat factors`     |              | Factor matrix (L) SVD analysis             |
 | `estat triplerob`   | `trip`       | Theorem 5.1 triple-robustness bias bound decomposition (`\|Δᵘ\|₂ · \|Δᵗ\|₂ · \|B\|_*`) |
+| `estat distance`    | `dist`       | Unit distance distribution diagnostics     |
+| `estat mht`         |              | Multiple hypothesis testing correction     |
+| `estat eventstudy`  | `es`         | Event-study dynamic treatment effects      |
+| `estat pretrend`    | `pretest`    | Pre-trend test (all pre-treatment effects = 0) |
+| `estat table`       |              | Export results as formatted table (LaTeX/Markdown/CSV) |
 
 ### predict Types
 
 After `trop`, use `predict newvar, type` to generate predictions:
 
-| Type        | Description                                           |
-| ----------- | ----------------------------------------------------- |
-| `y0`        | Counterfactual outcome Y(0) **[default]**             |
-| `y1`        | Counterfactual outcome Y(1)                           |
-| `te`        | Treatment effect (treated obs only)                   |
-| `residuals` | Residuals Y - Y(0)                                    |
-| `alpha`     | Unit fixed effects                                    |
-| `beta`      | Time fixed effects                                    |
-| `mu`        | Global intercept (joint only)                         |
-| `xb`        | Linear prediction (equivalent to `y0`)                |
+| Type             | Description                                           |
+| ---------------- | ----------------------------------------------------- |
+| `y0`             | Counterfactual outcome Y(0) **[default]**             |
+| `y1`             | Counterfactual outcome Y(1)                           |
+| `te`             | Treatment effect (treated obs only)                   |
+| `residuals`      | Residuals Y - Y(0) - τ·W                              |
+| `fitted`         | Fitted values Ŷ = Y(0) + τ·W                          |
+| `alpha`          | Unit fixed effects                                    |
+| `beta`           | Time fixed effects                                    |
+| `mu`             | Global intercept (joint only)                         |
+| `xb`             | Linear prediction (equivalent to `y0`)                |
+| `att`            | Treatment effect (alias for `te`)                     |
+| `counterfactual` | Counterfactual Y(0) (alias for `y0`)                  |
 
 ## Methodology
 
@@ -867,11 +924,163 @@ than personal preference:
    `matrix list e(beta)`.  Pinned by
    `tests/test_alpha_beta_rownames.do`.
 
-**Out of scope (current release).** Survey-weighted bootstrap with
-`pweight`, `strata`, `PSU`, and `FPC`; time-varying covariates
-$X_{it}\beta$ (paper Section 6.2); and switching-treatment patterns
+**Out of scope (current release).** Time-varying covariates
+$X_{it}\beta$ (the current implementation supports time-invariant
+covariates $X_i'\gamma$ per paper Section 6.2 Eq. 14, but not
+full panel-varying regressors); and switching-treatment patterns
 under `method(joint)`.  These lie outside the current scope and are
 planned for a future release.
+
+## Known Limitations
+
+### Functional Constraints
+
+| Limitation | Description | Status |
+|-----------|-------------|--------|
+| Covariate dimension | Requires p < min(N, T) where p is the number of covariates | By design |
+| Time-varying covariates | X_{it}β form not supported | Planned |
+| Staggered adoption (Joint) | `method(joint)` requires simultaneous treatment adoption | Paper constraint |
+| Staggered adoption (Twostep) | `method(twostep)` implicitly allows staggering without full theoretical guarantee | Use with caution |
+
+### Performance & Memory
+
+| Constraint | Description | Mitigation |
+|-----------|-------------|------------|
+| LOOCV complexity | Large panels (N>200, T>50) may be slow | Use `fixedlambda()` or `grid_style(default)` |
+| Bootstrap memory | B iterations require O(B·N·T) memory | Reduce `bootstrap()` count |
+| Distance matrix | O(N²) unit distance matrix storage | Keep panel size N<500 |
+
+## Troubleshooting
+
+### Common Errors
+
+| Error Code | Meaning | Solution |
+|-----------|---------|----------|
+| 3 | Invalid treatment assignment | Verify treatment variable is binary (0/1) |
+| 4 | No valid control observations | Ensure pre-treatment control observations exist |
+| 5 | Estimation did not converge | Try increasing `maxiter()` or relaxing `tol()` |
+| 8 | Invalid panel structure | Check panel/time variable uniqueness |
+| 12 | SVD decomposition failed | Check for perfectly collinear covariates |
+| 13 | Singleton PSU | Use `singleunit(centered)` option |
+
+### Numerical Stability Issues
+
+**Symptoms**: High LOOCV failure rate (>10%) or non-convergence
+
+**Diagnosis**:
+1. Check `e(loocv_fail_rate)` — if >0.10, grid search quality is compromised
+2. Check `e(condition_number)` — if >1e10, design matrix is ill-conditioned
+3. Check `e(effective_rank)` — low rank may indicate overfitting
+
+**Solutions**:
+- Reduce covariates or check for multicollinearity
+- Use `grid_style(default)` instead of `grid_style(extended)`
+- Consider winsorizing extreme values
+
+### Performance Tips
+
+| Scenario | Recommendation |
+|----------|---------------|
+| Large panels (N>100, T>30) | Use `fixedlambda()` to skip LOOCV |
+| Slow bootstrap | Start with `bootstrap(200)`, increase after confirmation |
+| Memory issues | Reduce panel size or estimate on subsamples |
+
+## Third-Party Command Integration
+
+### estout / esttab Integration
+
+`trop` stores its results in `e()` following Stata conventions. To export results via `estout` / `esttab`, construct a compatible coefficient vector:
+
+```stata
+* Run TROP estimation
+trop y d, panelvar(id) timevar(t) fixedlambda(0.1 0 0.9) bootstrap(200) seed(42)
+
+* Approach 1: Post e(b) and e(V) directly (already 1x1 matrices)
+eststo trop_model
+
+* Approach 2: Add custom scalars for richer tables
+estadd scalar att = e(att)
+estadd scalar se = e(se)
+estadd scalar pvalue = e(pvalue)
+estadd scalar ci_lo = e(ci_lower)
+estadd scalar ci_hi = e(ci_upper)
+estadd local method = e(method)
+
+* Export to LaTeX
+esttab trop_model, stats(att se pvalue ci_lo ci_hi method) ///
+    title("TROP Estimation Results")
+
+* Export to CSV
+esttab trop_model using results.csv, stats(att se pvalue) csv replace
+```
+
+### coefplot Integration
+
+`trop` results can be visualised with `coefplot` after estimation:
+
+```stata
+* Standard coefficient plot (plots e(b) with e(V))
+trop y d, panelvar(id) timevar(t) fixedlambda(0.1 0 0.9) bootstrap(200) seed(42)
+coefplot, title("TROP ATT Estimate")
+```
+
+For event study plots, use the built-in `estat eventstudy` command:
+
+```stata
+* Event study with internal plotting
+estat eventstudy, graph
+
+* Or extract data for custom coefplot formatting
+estat eventstudy, nograph
+matrix es = r(event_effects)
+```
+
+### Multiple Model Comparison
+
+```stata
+* Compare twostep vs joint
+trop y d, panelvar(id) timevar(t) fixedlambda(0.1 0 0.9) bootstrap(200) seed(42)
+eststo twostep_model
+
+trop y d, panelvar(id) timevar(t) method(joint) fixedlambda(0.1 0 0.9) bootstrap(200) seed(42)
+eststo joint_model
+
+esttab twostep_model joint_model, ///
+    mtitles("Twostep" "Joint") ///
+    stats(att se pvalue N_obs)
+```
+
+## Performance Tuning
+
+### Bootstrap Parallel Computation
+
+TROP's bootstrap variance estimation uses the Rayon parallel library in the Rust backend, utilising all available CPU cores by default.
+
+**Thread control:** Set the `RAYON_NUM_THREADS` environment variable before calling `trop`:
+
+```stata
+* Limit to 4 threads
+shell export RAYON_NUM_THREADS=4
+
+* Or set in your shell startup script
+* ~/.bashrc: export RAYON_NUM_THREADS=4
+```
+
+**Performance guidelines:**
+
+| Panel size | Bootstrap(B) | Approximate time |
+|-----------|--------------|------------------|
+| Small (N<50, T<20) | 200 | < 30 seconds |
+| Medium (N=50–200, T=20–50) | 500 | 2–10 minutes |
+| Large (N>200, T>50) | 200 | 10–60 minutes |
+
+**Memory estimate:** Approximately `8 × N × T × B` bytes. For example, N=100, T=50, B=500 requires ~200 MB.
+
+**Tips for large panels:**
+- Use `fixedlambda()` to skip LOOCV (the most time-intensive step)
+- Start with `bootstrap(200)` for exploratory analysis
+- Increase to `bootstrap(500)` or `bootstrap(1000)` for final results
+- Monitor `e(loocv_fail_rate)` — high failure rates indicate numerical difficulty
 
 ## References
 
@@ -914,7 +1123,7 @@ If you use this package in your research, please cite both the methodology paper
   title={trop: Stata module for Triply Robust Panel estimation},
   author={Xuanyu Cai and Wenli Xu},
   year={2025},
-  version={1.0.0},
+  version={1.2.0},
   url={https://github.com/gorgeousfish/TROP}
 }
 
