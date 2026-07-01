@@ -791,3 +791,114 @@ void _trop_triplerob_stash(
 }
 
 end
+
+mata:
+mata set matastrict on
+
+/*──────────────────────────────────────────────────────────────────────────────
+  _trop_estat_distance_compute()
+
+  Extracted from _trop_estat_distance.ado to avoid Stata 19 `mata: {}` block
+  parsing incompatibility inside program define.
+──────────────────────────────────────────────────────────────────────────────*/
+
+void _trop_estat_distance_compute(real scalar n_units, real scalar n_periods,
+    string scalar depvar, string scalar treatvar)
+{
+    real matrix _ed_Y, _ed_D, _ed_obs_data
+    real scalar _ed_N, _ed_T, _ed_nobs, _ed_k
+    real scalar _ed_row_t, _ed_col_i
+    string scalar _ed_panel_idx_var, _ed_time_idx_var, _ed_touse_var
+
+    _ed_N = n_units
+    _ed_T = n_periods
+
+    _ed_panel_idx_var = st_global("__trop_panel_idx_var")
+    _ed_time_idx_var  = st_global("__trop_time_idx_var")
+    _ed_touse_var     = ""
+
+    if (_ed_panel_idx_var == "" | _ed_time_idx_var == "" | ///
+        _st_varindex(_ed_panel_idx_var) >= . | ///
+        _st_varindex(_ed_time_idx_var) >= .) {
+        errprintf("Panel index variables not found in memory.\n")
+        errprintf("Re-run trop estimation before using estat distance.\n")
+        st_local("_ed_rc", "459")
+    }
+    else {
+        st_local("_ed_rc", "0")
+
+        _ed_obs_data = st_data(., ///
+            (depvar, treatvar, _ed_panel_idx_var, _ed_time_idx_var), ///
+            "e(sample)")
+        _ed_nobs = rows(_ed_obs_data)
+
+        _ed_Y = J(_ed_T, _ed_N, .)
+        _ed_D = J(_ed_T, _ed_N, 0)
+
+        for (_ed_k = 1; _ed_k <= _ed_nobs; _ed_k++) {
+            _ed_row_t = _ed_obs_data[_ed_k, 4]
+            _ed_col_i = _ed_obs_data[_ed_k, 3]
+            if (_ed_row_t >= 1 & _ed_row_t <= _ed_T & ///
+                _ed_col_i >= 1 & _ed_col_i <= _ed_N) {
+                _ed_Y[_ed_row_t, _ed_col_i] = _ed_obs_data[_ed_k, 1]
+                _ed_D[_ed_row_t, _ed_col_i] = (_ed_obs_data[_ed_k, 2] != 0 ? 1 : 0)
+            }
+        }
+
+        /* Compute pairwise distances */
+        real matrix _ed_dist_mat
+        real scalar _ed_i, _ed_j, _ed_t
+        real scalar _ed_sum_sq, _ed_n_common
+        real colvector _ed_valid_dist
+
+        _ed_dist_mat = J(_ed_N, _ed_N, .)
+        _ed_valid_dist = J(0, 1, .)
+
+        for (_ed_i = 1; _ed_i <= _ed_N; _ed_i++) {
+            _ed_dist_mat[_ed_i, _ed_i] = 0
+            for (_ed_j = _ed_i + 1; _ed_j <= _ed_N; _ed_j++) {
+                _ed_sum_sq = 0
+                _ed_n_common = 0
+                for (_ed_t = 1; _ed_t <= _ed_T; _ed_t++) {
+                    if (_ed_D[_ed_t, _ed_i] == 0 & _ed_D[_ed_t, _ed_j] == 0 & ///
+                        _ed_Y[_ed_t, _ed_i] < . & _ed_Y[_ed_t, _ed_j] < .) {
+                        _ed_sum_sq = _ed_sum_sq + ///
+                            (_ed_Y[_ed_t, _ed_i] - _ed_Y[_ed_t, _ed_j])^2
+                        _ed_n_common++
+                    }
+                }
+                if (_ed_n_common > 0) {
+                    _ed_dist_mat[_ed_i, _ed_j] = sqrt(_ed_sum_sq / _ed_n_common)
+                    _ed_dist_mat[_ed_j, _ed_i] = _ed_dist_mat[_ed_i, _ed_j]
+                    _ed_valid_dist = _ed_valid_dist \ _ed_dist_mat[_ed_i, _ed_j]
+                }
+            }
+        }
+
+        st_matrix("__ed_dist_mat", _ed_dist_mat)
+        if (rows(_ed_valid_dist) > 0) {
+            st_numscalar("__ed_mean", mean(_ed_valid_dist))
+            st_numscalar("__ed_sd", sqrt(variance(_ed_valid_dist)))
+            st_numscalar("__ed_min", min(_ed_valid_dist))
+            st_numscalar("__ed_max", max(_ed_valid_dist))
+            st_numscalar("__ed_N_pairs", rows(_ed_valid_dist))
+
+            real scalar _ed_p25_idx, _ed_p50_idx, _ed_p75_idx
+            real colvector _ed_sorted
+            _ed_sorted = sort(_ed_valid_dist, 1)
+            _ed_p25_idx = max((1, ceil(0.25 * rows(_ed_sorted))))
+            _ed_p50_idx = max((1, ceil(0.50 * rows(_ed_sorted))))
+            _ed_p75_idx = max((1, ceil(0.75 * rows(_ed_sorted))))
+            st_numscalar("__ed_p25", ///
+                _ed_sorted[_ed_p25_idx])
+            st_numscalar("__ed_p50", ///
+                _ed_sorted[_ed_p50_idx])
+            st_numscalar("__ed_p75", ///
+                _ed_sorted[_ed_p75_idx])
+
+            st_matrix("__ed_distances", _ed_valid_dist')
+        }
+    }
+}
+
+end
