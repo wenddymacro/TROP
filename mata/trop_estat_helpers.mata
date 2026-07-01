@@ -829,7 +829,7 @@ void _trop_estat_distance_compute(real scalar n_units, real scalar n_periods,
 
         _ed_obs_data = st_data(., ///
             (depvar, treatvar, _ed_panel_idx_var, _ed_time_idx_var), ///
-            "e(sample)")
+            st_global("__trop_touse_var") != "" ? st_global("__trop_touse_var") : "")
         _ed_nobs = rows(_ed_obs_data)
 
         _ed_Y = J(_ed_T, _ed_N, .)
@@ -897,6 +897,17 @@ void _trop_estat_distance_compute(real scalar n_units, real scalar n_periods,
                 _ed_sorted[_ed_p75_idx])
 
             st_matrix("__ed_distances", _ed_valid_dist')
+        }
+        else {
+            /* Zero valid pairs: set N_pairs = 0, others to missing */
+            st_numscalar("__ed_N_pairs", 0)
+            st_numscalar("__ed_mean", .)
+            st_numscalar("__ed_sd", .)
+            st_numscalar("__ed_min", .)
+            st_numscalar("__ed_max", .)
+            st_numscalar("__ed_p25", .)
+            st_numscalar("__ed_p50", .)
+            st_numscalar("__ed_p75", .)
         }
     }
 }

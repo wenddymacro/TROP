@@ -43,18 +43,42 @@ program define _trop_estat_distance, rclass
     ────────────────────────────────────────────────────────────────────── */
 
     // Rebuild 1..N / 1..T index variables (originals cleaned after trop)
-    tempvar _ed_pidx _ed_tidx
-    qui egen `_ed_pidx' = group(`panelvar') if e(sample)
-    qui egen `_ed_tidx' = group(`timevar') if e(sample)
+    tempvar _ed_pidx _ed_tidx _ed_touse
+    qui gen byte `_ed_touse' = e(sample)
+    qui egen `_ed_pidx' = group(`panelvar') if `_ed_touse'
+    qui egen `_ed_tidx' = group(`timevar') if `_ed_touse'
     // Pass tempvar names to Mata via globals (only way across ADO->Mata boundary)
     mata: st_global("__trop_panel_idx_var", "`_ed_pidx'")
     mata: st_global("__trop_time_idx_var", "`_ed_tidx'")
+    mata: st_global("__trop_touse_var", "`_ed_touse'")
 
     mata: _trop_estat_distance_compute(`N_units', `N_periods', "`depvar'", "`treatvar'")
 
     // Check for computation errors
     if `_ed_rc' != 0 {
         exit `_ed_rc'
+    }
+
+    // Check for zero valid pairs
+    if scalar(__ed_N_pairs) == 0 | missing(scalar(__ed_N_pairs)) {
+        di as txt _n "{hline 62}"
+        di as txt "Unit Distance Distribution (Eq.3: RMSE over control periods)"
+        di as txt "{hline 62}"
+        di as txt "  {it:No valid unit pairs found.}"
+        di as txt "  All unit pairs lack common non-treated periods with"
+        di as txt "  non-missing outcomes, so distances cannot be computed."
+        di as txt "{hline 62}"
+        return scalar N_pairs = 0
+        capture scalar drop __ed_N_pairs
+        capture scalar drop __ed_mean
+        capture scalar drop __ed_sd
+        capture scalar drop __ed_min
+        capture scalar drop __ed_max
+        capture scalar drop __ed_p25
+        capture scalar drop __ed_p50
+        capture scalar drop __ed_p75
+        capture matrix drop __ed_distances
+        exit 0
     }
 
     /* ──────────────────────────────────────────────────────────────────────

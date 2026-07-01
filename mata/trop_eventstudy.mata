@@ -489,6 +489,86 @@ void _trop_run_pretrend_test(
     st_numscalar("__pretrend_nperiods", df)
 }
 
-end
+
 
 /* ── version tag: trop_eventstudy.mata v1.1 ─────────────────────────────── */
+
+/*──────────────────────────────────────────────────────────────────────────────
+  _trop_estat_eventstudy_compute()
+  Extracted from _trop_estat_eventstudy.ado for Stata 19 compatibility.
+──────────────────────────────────────────────────────────────────────────────*/
+void _trop_estat_eventstudy_compute(string scalar tau_mat_name, ///
+    string scalar treatvar, real scalar level)
+{
+    real matrix _es_tau_m, _es_D_m, _es_result
+    real scalar _es_nT, _es_nN, _es_nobs, _es_k
+    real scalar _es_row_t, _es_col_i
+    real matrix _es_obs_data
+    string scalar _es_touse_var, _es_panel_idx_var, _es_time_idx_var
+
+    _es_tau_m = st_matrix(tau_mat_name)
+    _es_nT = rows(_es_tau_m)
+    _es_nN = cols(_es_tau_m)
+
+    _es_touse_var = st_global("__trop_touse_var")
+    _es_panel_idx_var = st_global("__trop_panel_idx_var")
+    _es_time_idx_var = st_global("__trop_time_idx_var")
+
+    if (_es_touse_var != "" & _es_panel_idx_var != "" & _es_time_idx_var != "" & ///
+        _st_varindex(_es_touse_var) < . & _st_varindex(_es_panel_idx_var) < . & ///
+        _st_varindex(_es_time_idx_var) < . & _st_varindex(treatvar) < .) {
+
+        _es_D_m = J(_es_nT, _es_nN, 0)
+        _es_obs_data = st_data(., (treatvar, _es_panel_idx_var, _es_time_idx_var), _es_touse_var)
+        _es_nobs = rows(_es_obs_data)
+        for (_es_k = 1; _es_k <= _es_nobs; _es_k++) {
+            _es_row_t = _es_obs_data[_es_k, 3]
+            _es_col_i = _es_obs_data[_es_k, 2]
+            if (_es_row_t >= 1 & _es_row_t <= _es_nT & _es_col_i >= 1 & _es_col_i <= _es_nN) {
+                _es_D_m[_es_row_t, _es_col_i] = (_es_obs_data[_es_k, 1] != 0 ? 1 : 0)
+            }
+        }
+    }
+    else {
+        _es_D_m = (_es_tau_m :< .)
+    }
+
+    _es_result = _trop_aggregate_by_horizon(_es_tau_m, _es_D_m, level)
+    st_matrix("__es_result", _es_result)
+}
+
+
+/*── Window filter helper ──*/
+void _trop_estat_eventstudy_filter(real scalar wlow, real scalar whigh, real scalar nkeep)
+{
+    real matrix _es_orig, _es_filtered
+    real scalar _es_r, _es_cnt
+    _es_orig = st_matrix("__es_result")
+    _es_filtered = J(nkeep, 6, .)
+    _es_cnt = 0
+    for (_es_r = 1; _es_r <= rows(_es_orig); _es_r++) {
+        if (_es_orig[_es_r, 1] >= wlow & _es_orig[_es_r, 1] <= whigh) {
+            _es_cnt++
+            _es_filtered[_es_cnt, .] = _es_orig[_es_r, .]
+        }
+    }
+    st_matrix("__es_result", _es_filtered)
+}
+
+/*── Placebo/pretrend helper ──*/
+void _trop_estat_eventstudy_placebo(string scalar depvar, string scalar panelvar, ///
+    string scalar timevar, string scalar treatvar, ///
+    real scalar placebo_periods, real scalar level)
+{
+    real matrix _es_placebo_result
+    real rowvector _es_pretrend
+    _es_placebo_result = _trop_placebo_effects(depvar, panelvar, ///
+        timevar, treatvar, placebo_periods, level)
+    st_matrix("__es_placebo", _es_placebo_result)
+    _es_pretrend = _trop_pretrend_test(_es_placebo_result)
+    st_numscalar("__es_chi2", _es_pretrend[1])
+    st_numscalar("__es_df", _es_pretrend[2])
+    st_numscalar("__es_pval", _es_pretrend[3])
+}
+
+end
