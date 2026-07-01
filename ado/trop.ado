@@ -955,9 +955,9 @@ program define trop, eclass
 
     // Build specification string for e(spec_string) — records the call
     // parameters so downstream consumers can reproduce the estimation.
-    global __trop_spec_string "method(`method'), lambda_time(`lambda_time_val'), lambda_unit(`lambda_unit_val'), lambda_nn(`lambda_nn_val')"
+    mata: st_global("__trop_spec_string", "method(`method'), lambda_time(`lambda_time_val'), lambda_unit(`lambda_unit_val'), lambda_nn(`lambda_nn_val')")
     if "`covariates'" != "" {
-        global __trop_spec_string "${__trop_spec_string}, covariates(`covariates')"
+        mata: st_global("__trop_spec_string", st_global("__trop_spec_string") + ", covariates(`covariates')")
     }
 
     // Transfer remaining estimation results from plugin temporaries to e()

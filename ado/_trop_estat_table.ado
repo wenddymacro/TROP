@@ -155,11 +155,11 @@ end
    ═══════════════════════════════════════════════════════════════════════════ */
 program define _trop_table_display
     syntax , att(string) se(string) ci_lower(string) ci_upper(string)     ///
-        pvalue(string) star(string) lambda_time(string) lambda_unit(string) ///
+        pvalue(string) lambda_time(string) lambda_unit(string) ///
         lambda_nn(string) method(string) n_units(string) n_periods(string)  ///
         n_treated(string) bootstrap_reps(string) loocv_rmse(string)         ///
         effective_rank(string) converged(string) title(string)              ///
-        decimals(integer)
+        decimals(integer) [star(string)]
 
     local fmt "%`=`decimals'+3'.`decimals'f"
     local w 47
@@ -265,11 +265,11 @@ end
    ═══════════════════════════════════════════════════════════════════════════ */
 program define _trop_table_latex
     syntax , att(string) se(string) ci_lower(string) ci_upper(string)     ///
-        pvalue(string) star(string) lambda_time(string) lambda_unit(string) ///
+        pvalue(string) lambda_time(string) lambda_unit(string) ///
         lambda_nn(string) method(string) n_units(string) n_periods(string)  ///
         n_treated(string) bootstrap_reps(string) loocv_rmse(string)         ///
         effective_rank(string) converged(string) title(string)              ///
-        notes(string) decimals(integer) fh(string)
+        notes(string) decimals(integer) fh(string) [star(string)]
 
     local fmt "%`=`decimals'+3'.`decimals'f"
 
@@ -404,11 +404,11 @@ end
    ═══════════════════════════════════════════════════════════════════════════ */
 program define _trop_table_markdown
     syntax , att(string) se(string) ci_lower(string) ci_upper(string)     ///
-        pvalue(string) star(string) lambda_time(string) lambda_unit(string) ///
+        pvalue(string) lambda_time(string) lambda_unit(string) ///
         lambda_nn(string) method(string) n_units(string) n_periods(string)  ///
         n_treated(string) bootstrap_reps(string) loocv_rmse(string)         ///
         effective_rank(string) converged(string) title(string)              ///
-        notes(string) decimals(integer) fh(string)
+        notes(string) decimals(integer) fh(string) [star(string)]
 
     local fmt "%`=`decimals'+3'.`decimals'f"
 
@@ -529,11 +529,11 @@ end
    ═══════════════════════════════════════════════════════════════════════════ */
 program define _trop_table_csv
     syntax , att(string) se(string) ci_lower(string) ci_upper(string)     ///
-        pvalue(string) star(string) lambda_time(string) lambda_unit(string) ///
+        pvalue(string) lambda_time(string) lambda_unit(string) ///
         lambda_nn(string) method(string) n_units(string) n_periods(string)  ///
         n_treated(string) bootstrap_reps(string) loocv_rmse(string)         ///
         effective_rank(string) converged(string) title(string)              ///
-        notes(string) decimals(integer) fh(string)
+        notes(string) decimals(integer) fh(string) [star(string)]
 
     local fmt "%`=`decimals'+3'.`decimals'f"
 
