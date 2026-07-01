@@ -42,6 +42,14 @@ program define _trop_estat_distance, rclass
        2. Compute pairwise unit distances via Mata
     ────────────────────────────────────────────────────────────────────── */
 
+    // Rebuild 1..N / 1..T index variables (originals cleaned after trop)
+    tempvar _ed_pidx _ed_tidx
+    qui egen `_ed_pidx' = group(`panelvar') if e(sample)
+    qui egen `_ed_tidx' = group(`timevar') if e(sample)
+    // Pass tempvar names to Mata via globals (only way across ADO->Mata boundary)
+    mata: st_global("__trop_panel_idx_var", "`_ed_pidx'")
+    mata: st_global("__trop_time_idx_var", "`_ed_tidx'")
+
     mata: {
         real matrix _ed_Y, _ed_D, _ed_obs_data
         real scalar _ed_N, _ed_T, _ed_nobs, _ed_k
@@ -51,7 +59,6 @@ program define _trop_estat_distance, rclass
         _ed_N = `N_units'
         _ed_T = `N_periods'
 
-        // Retrieve global variable names set by trop.ado
         _ed_panel_idx_var = st_global("__trop_panel_idx_var")
         _ed_time_idx_var  = st_global("__trop_time_idx_var")
         _ed_touse_var     = ""

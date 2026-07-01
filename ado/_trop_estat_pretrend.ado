@@ -67,6 +67,16 @@ program define _trop_estat_pretrend, rclass
     // If not specified (0), let the Mata function use all available pre-periods
     local n_periods = `periods'
 
+    // Rebuild 1..N / 1..T index variables from e(panelvar)/e(timevar)
+    // (the original tempvars are gone after trop_cleanup_temp_vars)
+    tempvar _pt_pidx _pt_tidx _pt_touse_tmp
+    qui gen byte `_pt_touse_tmp' = e(sample)
+    qui egen `_pt_pidx' = group(`panelvar') if `_pt_touse_tmp'
+    qui egen `_pt_tidx' = group(`timevar') if `_pt_touse_tmp'
+    mata: st_global("__trop_panel_idx_var", st_local("_pt_pidx"))
+    mata: st_global("__trop_time_idx_var", st_local("_pt_tidx"))
+    mata: st_global("__trop_touse_var", st_local("_pt_touse_tmp"))
+
     // Call Mata function to compute and display the pre-trend test
     mata: _trop_run_pretrend_test(`n_periods', `level', "`robust'", ///
         "`depvar'", "`panelvar'", "`timevar'", "`treatvar'")

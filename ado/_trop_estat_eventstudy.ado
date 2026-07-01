@@ -63,6 +63,16 @@ program define _trop_estat_eventstudy, rclass
     local timevar  "`e(timevar)'"
     local treatvar "`e(treatvar)'"
 
+    // Rebuild 1..N / 1..T index variables (originals cleaned after trop)
+    tempvar _es_pidx _es_tidx _es_touse_tmp
+    qui gen byte `_es_touse_tmp' = e(sample)
+    qui egen `_es_pidx' = group(`panelvar') if `_es_touse_tmp'
+    qui egen `_es_tidx' = group(`timevar') if `_es_touse_tmp'
+    // Pass tempvar names to Mata via globals
+    mata: st_global("__trop_panel_idx_var", "`_es_pidx'")
+    mata: st_global("__trop_time_idx_var", "`_es_tidx'")
+    mata: st_global("__trop_touse_var", "`_es_touse_tmp'")
+
     // Call Mata aggregation
     mata: {
         real matrix _es_tau_m, _es_D_m, _es_result
