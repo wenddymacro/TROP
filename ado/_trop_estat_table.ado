@@ -269,7 +269,7 @@ program define _trop_table_latex
         lambda_nn(string) method(string) n_units(string) n_periods(string)  ///
         n_treated(string) bootstrap_reps(string) loocv_rmse(string)         ///
         effective_rank(string) converged(string) title(string)              ///
-        notes(string) decimals(integer) fh(string) [star(string)]
+        decimals(integer) [notes(string) fh(string) star(string)]
 
     local fmt "%`=`decimals'+3'.`decimals'f"
 
@@ -408,7 +408,7 @@ program define _trop_table_markdown
         lambda_nn(string) method(string) n_units(string) n_periods(string)  ///
         n_treated(string) bootstrap_reps(string) loocv_rmse(string)         ///
         effective_rank(string) converged(string) title(string)              ///
-        notes(string) decimals(integer) fh(string) [star(string)]
+        decimals(integer) [notes(string) fh(string) star(string)]
 
     local fmt "%`=`decimals'+3'.`decimals'f"
 
@@ -533,7 +533,7 @@ program define _trop_table_csv
         lambda_nn(string) method(string) n_units(string) n_periods(string)  ///
         n_treated(string) bootstrap_reps(string) loocv_rmse(string)         ///
         effective_rank(string) converged(string) title(string)              ///
-        notes(string) decimals(integer) fh(string) [star(string)]
+        decimals(integer) [notes(string) fh(string) star(string)]
 
     local fmt "%`=`decimals'+3'.`decimals'f"
 
