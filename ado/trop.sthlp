@@ -730,11 +730,37 @@ Average treatment effect within each post-treatment period (event-time path):
 
 {pstd}
 {bf:{hline 70}}
+{bf:Bundled Datasets}
+{bf:{hline 70}}
+
+{pstd}
+The {cmd:trop} package ships six panel datasets under {cmd:data/}:
+
+{col 5}Dataset{col 30}Source{col 55}N{col 60}T{col 65}Treatment
+{col 5}{hline 70}
+{col 5}{cmd:cps_logwage.dta}{col 30}CPS log-wage (min wage){col 55}50{col 60}40{col 65}real
+{col 5}{cmd:cps_urate.dta}{col 30}CPS urate (min wage){col 55}50{col 60}40{col 65}real
+{col 5}{cmd:pwt_loggdp.dta}{col 30}PWT log-GDP (democracy){col 55}111{col 60}48{col 65}real
+{col 5}{cmd:germany_gdp.dta}{col 30}Abadie (2003) West Germany{col 55}17{col 60}44{col 65}{bf:d=0}
+{col 5}{cmd:basque_gdp.dta}{col 30}Abadie (2003) Basque Country{col 55}18{col 60}43{col 65}{bf:d=0}
+{col 5}{cmd:smoking_packs.dta}{col 30}California Prop 99{col 55}39{col 60}31{col 65}{bf:d=0}
+{col 5}{hline 70}
+
+{pstd}
+{bf:Important:} {cmd:germany_gdp}, {cmd:basque_gdp}, and {cmd:smoking_packs}
+have {cmd:d = 0} throughout.  They are raw outcome panels designed for
+semi-synthetic simulation (as in Athey et al. 2025, Table 1).  You must
+assign a treatment indicator before running {cmd:trop}.  See Example 4
+below for a worked demonstration.
+
+
+{pstd}
+{bf:{hline 70}}
 {bf:Complete Data Analysis Examples}
 {bf:{hline 70}}
 
 {pstd}
-The following three examples demonstrate end-to-end workflows using real
+The following four examples demonstrate end-to-end workflows using real
 and simulated panel data.  All datasets are included with the {cmd:trop}
 package under {cmd:data/}.
 
@@ -907,6 +933,51 @@ zero (Corollary 1).  In this simulated example, the true DGP satisfies
 Y(0) = alpha_i + beta_t + L_{it}, so the nuclear-norm regression
 adjustment is correctly specified (||B||_* approx 0), guaranteeing
 consistency regardless of finite-sample weight imbalance.
+
+
+{pstd}
+{bf:Example 4: Basque GDP data {hline 2} semi-synthetic simulation (d=0 panel)}
+
+{pstd}
+The Basque Country GDP dataset (Abadie & Gardeazabal 2003) ships with
+{cmd:d = 0} throughout because it is a raw outcome panel.  To replicate
+the paper's Table 1 Monte Carlo exercise, you assign treatment randomly
+or designate a specific unit as treated.  This example demonstrates both
+approaches.
+
+{phang}{it:Approach A: Treated-unit simulation (designate Basque Country)}{p_end}
+
+{phang2}{cmd:. use "data/basque_gdp.dta", clear}{p_end}
+{phang2}{cmd:. tab d}{p_end}
+{phang2}{cmd:. * All d=0 -- assign treatment to unit 17 (Basque Country) post-1970}{p_end}
+{phang2}{cmd:. replace d = (id == 17) & (t >= 1970)}{p_end}
+{phang2}{cmd:. tab d}{p_end}
+{phang2}{cmd:. trop y d, panelvar(id) timevar(t) method(joint) fixedlambda(0.35 0 0.006) seed(42)}{p_end}
+{phang2}{cmd:. display "ATT (Basque treated-unit) = " e(att)}{p_end}
+
+{phang}{it:Approach B: Random treatment assignment (Table 1 design)}{p_end}
+
+{phang2}{cmd:. use "data/basque_gdp.dta", clear}{p_end}
+{phang2}{cmd:. * Randomly assign 3 units as treated from t >= 1975}{p_end}
+{phang2}{cmd:. set seed 2025}{p_end}
+{phang2}{cmd:. bysort id: gen tag = (_n == 1)}{p_end}
+{phang2}{cmd:. gen u = runiform() if tag}{p_end}
+{phang2}{cmd:. bysort id (u): replace u = u[1]}{p_end}
+{phang2}{cmd:. sort u}{p_end}
+{phang2}{cmd:. egen rank = group(u)}{p_end}
+{phang2}{cmd:. replace d = (rank <= 3) & (t >= 1975)}{p_end}
+{phang2}{cmd:. drop tag u rank}{p_end}
+{phang2}{cmd:. trop y d, panelvar(id) timevar(t) method(twostep) fixedlambda(0.35 0 0.006) seed(42)}{p_end}
+{phang2}{cmd:. display "ATT (random treatment) = " e(att)}{p_end}
+
+{pstd}
+{bf:Interpretation.}  Because the true treatment effect is zero (the
+treatment was assigned artificially to a pre-existing observational
+panel), the estimated ATT should be close to zero.  Systematic deviation
+from zero indicates finite-sample bias.  The paper's Table 1 reports the
+normalized RMSE across many such random draws to compare estimator
+performance.  The {cmd:basque_gdp}, {cmd:germany_gdp}, and
+{cmd:smoking_packs} datasets are all used this way.
 
 
 {marker results}{...}

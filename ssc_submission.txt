@@ -12,7 +12,7 @@ Description: Implements the triply robust panel estimator of Athey, Imbens,
   include leave-one-out cross-validation (LOOCV) for hyperparameter selection,
   cluster bootstrap inference, event-study analysis, multiple hypothesis
   testing correction, and comprehensive postestimation diagnostics.
-Required Stata version: 16.0 or later
+Required Stata version: 17.0 or later
 Required packages: none (self-contained with pre-compiled plugins for
   macOS ARM64, macOS x64, Linux x64, and Windows x64)
 Keywords: panel data, causal inference, triple robustness, synthetic control,
