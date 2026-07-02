@@ -888,6 +888,11 @@ program define trop, eclass
         mata: st_numscalar("__trop_n_covariates", 0)
     }
 
+    // --- LOOCV computational cost advisory --------------------------------
+    if `run_cv' & `_verbose_level' >= 1 & `N_control' > 500 {
+        di as txt "Note: LOOCV with `N_control' control cells may take several minutes."
+    }
+
     // Dispatch to the compiled plugin through the Mata interface layer.
     // trop_main() returns 0 on success or a Stata return code on failure.
     // An empty `weight_var' is treated as "no pweight" by the Mata entry
@@ -1145,6 +1150,7 @@ program define trop, eclass
 
     // --- Restore validation diagnostics -----------------------------------
     // These were cached in locals before ereturn post cleared e().
+    ereturn scalar N = `N_obs'
     ereturn scalar N_obs = `N_obs'
     ereturn scalar balanced = `balanced'
     ereturn scalar miss_rate = `miss_rate'

@@ -258,6 +258,13 @@ uniform weights. For lambda_nn, infinity disables the low-rank factor model.
 
 {dlgtab:LOOCV Control}
 
+{pstd}
+{bf:Computational cost:} LOOCV evaluates the cross-validation criterion for each
+control observation across all grid points.  For panels with N*T > 500 control
+cells, consider using {cmd:fixedlambda()} with theoretically motivated values,
+or reducing the grid with {cmd:grid_style(default)}.
+{p_end}
+
 {phang}
 {opth fixedlambda(numlist)} specifies fixed values for (lambda_time,
 lambda_unit, lambda_nn), bypassing LOOCV hyperparameter selection entirely.
@@ -278,6 +285,13 @@ minimization algorithm. Default is {cmd:1e-6}.
 {opt maxiter(#)} specifies the maximum number of iterations for the
 alternating minimization algorithm. Default is {cmd:500}.
 
+{pstd}
+For large panels (N > 30 or T > 25), the default {cmd:maxiter(500)} may be
+insufficient for convergence.  Consider increasing to {cmd:maxiter(1000)} or
+{cmd:maxiter(2000)} for such cases.  Convergence status is reported in
+{cmd:e(converged)}.
+{p_end}
+
 {dlgtab:Bootstrap Inference}
 
 {phang}
@@ -287,6 +301,13 @@ Set to {cmd:0} to skip bootstrap inference; the point estimate is still
 returned but standard errors, p-values, and confidence intervals are not
 computed. The bootstrap constructs each replicate by sampling N_0 control
 units with replacement and N_1 treated units with replacement separately.
+
+{pstd}
+{bf:Performance note:} Each bootstrap replication requires a full model re-estimation.
+For panels with N > 20 units, expect ~5-10 seconds per replication.
+Use {cmd:bootstrap(30)} for quick diagnostics or {cmd:bootstrap(200)} for
+publication-quality inference.
+{p_end}
 
 {pmore}
 {bf:Confidence intervals.} Three candidate intervals are always computed
