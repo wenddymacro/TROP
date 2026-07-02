@@ -9,6 +9,15 @@
 //!   ω_j^{i,t}(λ) = exp(-λ_unit · dist^unit_{-t}(j, i))
 //! which down-weight control units whose outcome trajectories diverge from
 //! the target unit i over jointly observed control periods.
+//!
+//! ## Caching strategy
+//!
+//! [`UnitDistanceCache`] stores a per-unit validity mask and a sanitized copy
+//! of Y (O(N·T) memory). On-demand `compute_distance` queries cost O(T) each.
+//! When N ≤ 2000, `build_with_full_matrix` additionally pre-computes the full
+//! N×N pairwise distance matrix (~32 MB cap) for O(1) lookups via
+//! `get_cached_distance`, accelerating weight computations that do not require
+//! the leave-one-period-out variant.
 
 use ndarray::{Array2, ArrayView1, ArrayView2};
 use rayon::prelude::*;
@@ -236,6 +245,10 @@ pub struct UnitDistanceCache {
     unit_valid: Vec<bool>,
     n_units: usize,
     n_periods: usize,
+    /// Optional pre-computed full N×N pairwise distance matrix (no period exclusion).
+    /// Only populated when N ≤ 2000 via `build_with_full_matrix`.
+    /// Distances are computed over all jointly-valid control periods (exclude_t = None).
+    pub full_pairwise: Option<Array2<f64>>,
 }
 
 impl UnitDistanceCache {
@@ -268,7 +281,49 @@ impl UnitDistanceCache {
             unit_valid,
             n_units,
             n_periods,
+            full_pairwise: None,
         }
+    }
+
+    /// Build the cache with a pre-computed full N×N pairwise distance matrix.
+    ///
+    /// When N ≤ 2000 (memory ≤ ~32 MB for the N×N f64 matrix), the full
+    /// pairwise distance matrix is computed upfront using `exclude_t = None`.
+    /// Subsequent calls to `get_cached_distance` can retrieve O(1) lookups
+    /// for the no-exclusion case.
+    ///
+    /// When N > 2000, falls back to the standard lazy `build` (no pre-computation).
+    pub fn build_with_full_matrix(y: &ArrayView2<f64>, d: &ArrayView2<f64>) -> Self {
+        let mut cache = Self::build(y, d);
+        let n_units = cache.n_units;
+
+        // Memory threshold: N > 2000 → skip (N×N × 8 bytes > 32 MB)
+        if n_units <= 2000 {
+            let mut distances = Array2::<f64>::zeros((n_units, n_units));
+            for i in 0..n_units {
+                for j in (i + 1)..n_units {
+                    let dist = cache.compute_distance(i, j, None);
+                    distances[[i, j]] = dist;
+                    distances[[j, i]] = dist;
+                }
+            }
+            cache.full_pairwise = Some(distances);
+        }
+
+        cache
+    }
+
+    /// Retrieve a pre-computed pairwise distance from the full matrix.
+    ///
+    /// Returns `Some(distance)` if the full pairwise matrix was built
+    /// (N ≤ 2000 at construction time), `None` otherwise.
+    ///
+    /// This provides O(1) lookup for the no-period-exclusion distance,
+    /// suitable for weight computations that do not need the leave-one-out
+    /// per-period variant.
+    #[inline]
+    pub fn get_cached_distance(&self, i: usize, j: usize) -> Option<f64> {
+        self.full_pairwise.as_ref().map(|m| m[[i, j]])
     }
 
     /// Compute the Eq. (3) distance on demand in O(T).

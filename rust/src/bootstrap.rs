@@ -602,158 +602,185 @@ pub fn bootstrap_trop_variance_full(
 
     let classification = classify_units(&d_arr.view());
 
-    // Parallel bootstrap: failed iterations yield None and are discarded.
+    // Stratified sampling always draws n_control + n_treated = n_units columns.
+    let n_boot_units = classification.n_control + classification.n_treated;
+    let n_cov = x_arr.as_ref().map_or(0, |xv| xv.ncols());
+
+    // Parallel bootstrap with per-task buffer reuse: each rayon task
+    // pre-allocates matrices once and reuses them across all iterations it
+    // processes, reducing heap allocations from O(B) to O(num_threads).
+    //
+    // Buffers reused across iterations: Y, D, mask (bootstrap matrices),
+    // weight_buf, alpha_buf, beta_buf, L_buf (estimation inner-loop).
     let bootstrap_estimates: Vec<f64> = (0..n_bootstrap)
         .into_par_iter()
-        .filter_map(|b| {
-            let iteration_seed = seed.wrapping_add(b as u64);
-            let sampled_units = stratified_sample(&classification, iteration_seed);
+        .fold(
+            || {
+                let x_buf = x_arr.as_ref().map(|xv| {
+                    Array2::<f64>::zeros((n_periods * n_boot_units, xv.ncols()))
+                });
+                let gamma_buf = if n_cov > 0 {
+                    Some(Array1::<f64>::zeros(n_cov))
+                } else {
+                    None
+                };
+                (
+                    Vec::<f64>::new(),
+                    Array2::<f64>::zeros((n_periods, n_boot_units)),
+                    Array2::<f64>::zeros((n_periods, n_boot_units)),
+                    Array2::<u8>::zeros((n_periods, n_boot_units)),
+                    Array2::<f64>::zeros((n_periods, n_boot_units)),
+                    Array1::<f64>::zeros(n_boot_units),
+                    Array1::<f64>::zeros(n_periods),
+                    Array2::<f64>::zeros((n_periods, n_boot_units)),
+                    gamma_buf,
+                    x_buf,
+                )
+            },
+            |(
+                mut results,
+                mut y_buf,
+                mut d_buf,
+                mut mask_buf,
+                mut weight_buf,
+                mut alpha_buf,
+                mut beta_buf,
+                mut l_buf,
+                mut gamma_buf,
+                mut x_buf,
+            ), b| {
+                let iteration_seed = seed.wrapping_add(b as u64);
+                let sampled_units = stratified_sample(&classification, iteration_seed);
 
-            let (y_boot, d_boot, control_mask_boot) = build_bootstrap_matrices_with_mask(
-                &y_arr,
-                &d_arr,
-                &control_mask_arr,
-                &sampled_units,
-            );
-
-            let n_boot_units = d_boot.ncols();
-
-            // Resample X matrix by unit if covariates are present.
-            let x_boot = if let Some(ref x_owned) = x_arr {
-                let n_cov = x_owned.ncols();
-                let n_obs_boot = n_periods * n_boot_units;
-                let mut x_b = Array2::<f64>::zeros((n_obs_boot, n_cov));
-                for (j, &orig_unit) in sampled_units.iter().enumerate() {
-                    for t in 0..n_periods {
-                        let src_idx = t * n_units + orig_unit;
-                        let dst_idx = t * n_boot_units + j;
-                        x_b.row_mut(dst_idx).assign(&x_owned.row(src_idx));
-                    }
-                }
-                Some(x_b)
-            } else {
-                None
-            };
-
-            // Identify treated (t, i) pairs in the bootstrap sample.
-            let mut boot_treated: Vec<(usize, usize)> = Vec::new();
-            for t in 0..n_periods {
-                for i in 0..n_boot_units {
-                    if d_boot[[t, i]] == 1.0 {
-                        boot_treated.push((t, i));
-                    }
-                }
-            }
-
-            if boot_treated.is_empty() {
-                return None;
-            }
-
-            // Identify control units (never treated in bootstrap sample).
-            let mut boot_control_units: Vec<usize> = Vec::new();
-            for i in 0..n_boot_units {
-                let is_control = (0..n_periods).all(|t| d_boot[[t, i]] == 0.0);
-                if is_control {
-                    boot_control_units.push(i);
-                }
-            }
-
-            if boot_control_units.is_empty() {
-                return None;
-            }
-
-            // Build a per-iteration distance cache.  The cache is O(N·T) and
-            // shape-dependent on the resampled panel, so it is rebuilt per draw.
-            let dist_cache = UnitDistanceCache::build(&y_boot.view(), &d_boot.view());
-
-            // Pre-allocate reusable buffers for the treated-observation loop.
-            let mut weight_buf = Array2::<f64>::zeros((n_periods, n_boot_units));
-            let mut alpha_buf = Array1::<f64>::zeros(n_boot_units);
-            let mut beta_buf = Array1::<f64>::zeros(n_periods);
-            let mut l_buf = Array2::<f64>::zeros((n_periods, n_boot_units));
-            let n_cov_boot = x_boot.as_ref().map_or(0, |xb| xb.ncols());
-            let mut gamma_buf = if n_cov_boot > 0 {
-                Some(Array1::<f64>::zeros(n_cov_boot))
-            } else {
-                None
-            };
-
-            // Estimate τ(t,i) for each treated observation.
-            let mut tau_values = Vec::with_capacity(boot_treated.len());
-
-            // Warm start: reuse previous observation's converged solution as
-            // initial values for the next.  Under a fixed lambda triplet the
-            // weight matrices (and thus optima) are similar across treated
-            // observations, so warm-starting reduces FISTA iterations.
-            let mut warm_alpha: Option<Array1<f64>> = None;
-            let mut warm_beta: Option<Array1<f64>> = None;
-            let mut warm_l: Option<Array2<f64>> = None;
-
-            for (t, i) in boot_treated {
-                compute_weight_matrix_cached_into(
-                    &mut weight_buf,
-                    &y_boot.view(),
-                    &d_boot.view(),
-                    &dist_cache,
-                    n_periods,
-                    n_boot_units,
-                    i,
-                    t,
-                    lt_eff,
-                    lu_eff,
-                    &time_dist_arr.view(),
+                build_bootstrap_matrices_with_mask_into(
+                    &mut y_buf, &mut d_buf, &mut mask_buf,
+                    &y_arr, &d_arr, &control_mask_arr,
+                    &sampled_units,
                 );
 
-                let ws = match (&warm_alpha, &warm_beta, &warm_l) {
-                    (Some(a), Some(b), Some(l_prev)) => Some((a, b, l_prev)),
-                    _ => None,
-                };
-
-                let x_boot_view = x_boot.as_ref().map(|xb| xb.view());
-                if let Some((_iters, _converged)) = estimate_model_into(
-                    &y_boot.view(),
-                    &control_mask_boot.view(),
-                    &weight_buf.view(),
-                    ln_eff,
-                    n_periods,
-                    n_boot_units,
-                    max_iter,
-                    tol,
-                    None,
-                    ws,
-                    x_boot_view.as_ref(),
-                    None,
-                    &mut alpha_buf,
-                    &mut beta_buf,
-                    &mut l_buf,
-                    gamma_buf.as_mut(),
-                ) {
-                    let mut tau = y_boot[[t, i]] - alpha_buf[i] - beta_buf[t] - l_buf[[t, i]];
-                    if let Some(ref x_b) = x_boot {
-                        if let Some(ref g) = gamma_buf {
-                            let idx = t * n_boot_units + i;
-                            tau -= x_b.row(idx).dot(g);
+                // Resample X matrix by unit if covariates are present.
+                if let (Some(ref x_owned), Some(ref mut xb)) = (&x_arr, &mut x_buf) {
+                    xb.fill(0.0);
+                    for (j, &orig_unit) in sampled_units.iter().enumerate() {
+                        for t in 0..n_periods {
+                            let src_idx = t * n_units + orig_unit;
+                            let dst_idx = t * n_boot_units + j;
+                            xb.row_mut(dst_idx).assign(&x_owned.row(src_idx));
                         }
                     }
-                    if tau.is_finite() {
-                        tau_values.push(tau);
-                    }
-
-                    // Stash converged solution for warm-starting the next observation.
-                    warm_alpha = Some(alpha_buf.clone());
-                    warm_beta = Some(beta_buf.clone());
-                    warm_l = Some(l_buf.clone());
                 }
-            }
 
-            if tau_values.is_empty() {
-                None
-            } else {
-                let att = tau_values.iter().sum::<f64>() / tau_values.len() as f64;
-                if att.is_finite() { Some(att) } else { None }
-            }
-        })
-        .collect();
+                // Identify treated (t, i) pairs in the bootstrap sample.
+                let mut boot_treated: Vec<(usize, usize)> = Vec::new();
+                for t in 0..n_periods {
+                    for i in 0..n_boot_units {
+                        if d_buf[[t, i]] == 1.0 {
+                            boot_treated.push((t, i));
+                        }
+                    }
+                }
+
+                if boot_treated.is_empty() {
+                    return (results, y_buf, d_buf, mask_buf, weight_buf, alpha_buf, beta_buf, l_buf, gamma_buf, x_buf);
+                }
+
+                // Identify control units (never treated in bootstrap sample).
+                let mut boot_control_units: Vec<usize> = Vec::new();
+                for i in 0..n_boot_units {
+                    let is_control = (0..n_periods).all(|t| d_buf[[t, i]] == 0.0);
+                    if is_control {
+                        boot_control_units.push(i);
+                    }
+                }
+
+                if boot_control_units.is_empty() {
+                    return (results, y_buf, d_buf, mask_buf, weight_buf, alpha_buf, beta_buf, l_buf, gamma_buf, x_buf);
+                }
+
+                // Build a per-iteration distance cache.  The cache is O(N·T) and
+                // shape-dependent on the resampled panel, so it is rebuilt per draw.
+                let dist_cache = UnitDistanceCache::build(&y_buf.view(), &d_buf.view());
+
+                // Estimate τ(t,i) for each treated observation.
+                let mut tau_values = Vec::with_capacity(boot_treated.len());
+
+                // Warm start: reuse previous observation's converged solution as
+                // initial values for the next.  Under a fixed lambda triplet the
+                // weight matrices (and thus optima) are similar across treated
+                // observations, so warm-starting reduces FISTA iterations.
+                let mut warm_alpha: Option<Array1<f64>> = None;
+                let mut warm_beta: Option<Array1<f64>> = None;
+                let mut warm_l: Option<Array2<f64>> = None;
+
+                for (t, i) in boot_treated {
+                    compute_weight_matrix_cached_into(
+                        &mut weight_buf,
+                        &y_buf.view(),
+                        &d_buf.view(),
+                        &dist_cache,
+                        n_periods,
+                        n_boot_units,
+                        i,
+                        t,
+                        lt_eff,
+                        lu_eff,
+                        &time_dist_arr.view(),
+                    );
+
+                    let ws = match (&warm_alpha, &warm_beta, &warm_l) {
+                        (Some(a), Some(b), Some(l_prev)) => Some((a, b, l_prev)),
+                        _ => None,
+                    };
+
+                    let x_view = x_buf.as_ref().map(|xb| xb.view());
+                    if let Some((_iters, _converged)) = estimate_model_into(
+                        &y_buf.view(),
+                        &mask_buf.view(),
+                        &weight_buf.view(),
+                        ln_eff,
+                        n_periods,
+                        n_boot_units,
+                        max_iter,
+                        tol,
+                        None,
+                        ws,
+                        x_view.as_ref(),
+                        None,
+                        &mut alpha_buf,
+                        &mut beta_buf,
+                        &mut l_buf,
+                        gamma_buf.as_mut(),
+                    ) {
+                        let mut tau = y_buf[[t, i]] - alpha_buf[i] - beta_buf[t] - l_buf[[t, i]];
+                        if let Some(ref xb) = x_buf {
+                            if let Some(ref g) = gamma_buf {
+                                let idx = t * n_boot_units + i;
+                                tau -= xb.row(idx).dot(g);
+                            }
+                        }
+                        if tau.is_finite() {
+                            tau_values.push(tau);
+                        }
+
+                        // Stash converged solution for warm-starting the next observation.
+                        warm_alpha = Some(alpha_buf.clone());
+                        warm_beta = Some(beta_buf.clone());
+                        warm_l = Some(l_buf.clone());
+                    }
+                }
+
+                if !tau_values.is_empty() {
+                    let att = tau_values.iter().sum::<f64>() / tau_values.len() as f64;
+                    if att.is_finite() {
+                        results.push(att);
+                    }
+                }
+
+                (results, y_buf, d_buf, mask_buf, weight_buf, alpha_buf, beta_buf, l_buf, gamma_buf, x_buf)
+            },
+        )
+        .map(|(results, ..)| results)
+        .reduce(Vec::new, |mut a, b| { a.extend(b); a });
 
     let n_valid = bootstrap_estimates.len();
 
@@ -896,100 +923,120 @@ pub fn bootstrap_trop_variance_joint_full(
         lambda_nn
     };
 
-    // Parallel bootstrap: failed iterations yield None and are discarded.
+    // Stratified sampling always draws n_control + n_treated = n_units columns.
+    let n_boot_units = classification.n_control + classification.n_treated;
+
+    // Parallel bootstrap with per-task buffer reuse: each rayon task
+    // pre-allocates matrices once and reuses them across all iterations it
+    // processes, reducing heap allocations from O(B) to O(num_threads).
     let bootstrap_estimates: Vec<f64> = (0..n_bootstrap)
         .into_par_iter()
-        .filter_map(|b| {
-            let iteration_seed = seed.wrapping_add(b as u64);
-            let sampled_units = stratified_sample(&classification, iteration_seed);
+        .fold(
+            || {
+                let x_buf = x_arr.as_ref().map(|xv| {
+                    Array2::<f64>::zeros((n_periods * n_boot_units, xv.ncols()))
+                });
+                (
+                    Vec::<f64>::new(),
+                    Array2::<f64>::zeros((n_periods, n_boot_units)),
+                    Array2::<f64>::zeros((n_periods, n_boot_units)),
+                    x_buf,
+                )
+            },
+            |(mut results, mut y_buf, mut d_buf, mut x_buf), b| {
+                let iteration_seed = seed.wrapping_add(b as u64);
+                let sampled_units = stratified_sample(&classification, iteration_seed);
 
-            let (y_boot, d_boot) = build_bootstrap_matrices(&y_arr, &d_arr, &sampled_units);
+                build_bootstrap_matrices_into(
+                    &mut y_buf, &mut d_buf,
+                    &y_arr, &d_arr,
+                    &sampled_units,
+                );
 
-            let n_boot_units = y_boot.ncols();
-
-            // Resample X matrix by unit if covariates are present.
-            let x_boot = if let Some(ref x_owned) = x_arr {
-                let n_cov = x_owned.ncols();
-                let n_obs_boot = n_periods * n_boot_units;
-                let mut x_b = Array2::<f64>::zeros((n_obs_boot, n_cov));
-                for (j, &orig_unit) in sampled_units.iter().enumerate() {
-                    for t in 0..n_periods {
-                        let src_idx = t * n_units + orig_unit;
-                        let dst_idx = t * n_boot_units + j;
-                        x_b.row_mut(dst_idx).assign(&x_owned.row(src_idx));
+                // Resample X matrix by unit if covariates are present.
+                if let (Some(ref x_owned), Some(ref mut xb)) = (&x_arr, &mut x_buf) {
+                    xb.fill(0.0);
+                    for (j, &orig_unit) in sampled_units.iter().enumerate() {
+                        for t in 0..n_periods {
+                            let src_idx = t * n_units + orig_unit;
+                            let dst_idx = t * n_boot_units + j;
+                            xb.row_mut(dst_idx).assign(&x_owned.row(src_idx));
+                        }
                     }
                 }
-                Some(x_b)
-            } else {
-                None
-            };
 
-            // Compute joint weights using the original treated-period count.
-            let delta = compute_joint_weights(
-                &y_boot.view(),
-                &d_boot.view(),
-                lt_eff,
-                lu_eff,
-                treated_periods,
-            );
+                // Compute joint weights using the original treated-period count.
+                let delta = compute_joint_weights(
+                    &y_buf.view(),
+                    &d_buf.view(),
+                    lt_eff,
+                    lu_eff,
+                    treated_periods,
+                );
 
-            // Solve the joint model; branch on whether low-rank is active.
-            //
-            // τ is post-hoc: mean residual (Y − μ − α − β − L) over treated cells.
-            // When λ_nn ≥ 1e10 we skip the low-rank fit and L ≡ 0.
-            // B.2 defensive check: compute_joint_weights (1 − D)-masks δ.
-            debug_assert_delta_is_1minus_d_masked(
-                &d_boot.view(), &delta.view(),
-                "bootstrap::joint/delta",
-            );
-            let x_boot_view = x_boot.as_ref().map(|xb| xb.view());
-            let result = if ln_eff >= 1e10 {
-                solve_joint_no_lowrank(
-                    &y_boot.view(),
-                    &delta.view(),
-                    x_boot_view.as_ref(),
-                ).map(
-                    |(mu, alpha_est, beta, result_gamma)| {
-                        let mut tau_sum = 0.0_f64;
-                        let mut tau_count = 0usize;
-                        for t in 0..n_periods {
-                            for i in 0..n_boot_units {
-                                if d_boot[[t, i]] == 1.0 && y_boot[[t, i]].is_finite() {
-                                    let mut tau_val = y_boot[[t, i]] - mu - alpha_est[i] - beta[t];
-                                    if let Some(ref x_b) = x_boot {
-                                        if let Some(ref g) = result_gamma {
-                                            let idx = t * n_boot_units + i;
-                                            tau_val -= x_b.row(idx).dot(g);
+                // Solve the joint model; branch on whether low-rank is active.
+                //
+                // τ is post-hoc: mean residual (Y − μ − α − β − L) over treated cells.
+                // When λ_nn ≥ 1e10 we skip the low-rank fit and L ≡ 0.
+                // B.2 defensive check: compute_joint_weights (1 − D)-masks δ.
+                debug_assert_delta_is_1minus_d_masked(
+                    &d_buf.view(), &delta.view(),
+                    "bootstrap::joint/delta",
+                );
+                let x_view = x_buf.as_ref().map(|xb| xb.view());
+                let result = if ln_eff >= 1e10 {
+                    solve_joint_no_lowrank(
+                        &y_buf.view(),
+                        &delta.view(),
+                        x_view.as_ref(),
+                    ).map(
+                        |(mu, alpha_est, beta, result_gamma)| {
+                            let mut tau_sum = 0.0_f64;
+                            let mut tau_count = 0usize;
+                            for t in 0..n_periods {
+                                for i in 0..n_boot_units {
+                                    if d_buf[[t, i]] == 1.0 && y_buf[[t, i]].is_finite() {
+                                        let mut tau_val = y_buf[[t, i]] - mu - alpha_est[i] - beta[t];
+                                        if let Some(ref xb) = x_buf {
+                                            if let Some(ref g) = result_gamma {
+                                                let idx = t * n_boot_units + i;
+                                                tau_val -= xb.row(idx).dot(g);
+                                            }
                                         }
+                                        tau_sum += tau_val;
+                                        tau_count += 1;
                                     }
-                                    tau_sum += tau_val;
-                                    tau_count += 1;
                                 }
                             }
-                        }
-                        if tau_count > 0 {
-                            tau_sum / tau_count as f64
-                        } else {
-                            f64::NAN
-                        }
-                    },
-                )
-            } else {
-                solve_joint_with_lowrank(
-                    &y_boot.view(),
-                    &d_boot.view(),
-                    &delta.view(),
-                    ln_eff,
-                    max_iter,
-                    tol,
-                    x_boot_view.as_ref(),
-                )
-                .map(|(_, _, _, _, tau, _, _, _)| tau)
-            };
+                            if tau_count > 0 {
+                                tau_sum / tau_count as f64
+                            } else {
+                                f64::NAN
+                            }
+                        },
+                    )
+                } else {
+                    solve_joint_with_lowrank(
+                        &y_buf.view(),
+                        &d_buf.view(),
+                        &delta.view(),
+                        ln_eff,
+                        max_iter,
+                        tol,
+                        x_view.as_ref(),
+                    )
+                    .map(|(_, _, _, _, tau, _, _, _)| tau)
+                };
 
-            result.filter(|tau| tau.is_finite())
-        })
-        .collect();
+                if let Some(tau) = result.filter(|t| t.is_finite()) {
+                    results.push(tau);
+                }
+
+                (results, y_buf, d_buf, x_buf)
+            },
+        )
+        .map(|(results, _, _, _)| results)
+        .reduce(Vec::new, |mut a, b| { a.extend(b); a });
 
     let n_valid = bootstrap_estimates.len();
 
@@ -1072,152 +1119,178 @@ pub fn bootstrap_trop_variance_full_weighted(
 
     let classification = classify_units(&d_arr.view());
 
+    // Stratified sampling always draws n_control + n_treated = n_units columns.
+    let n_boot_units = classification.n_control + classification.n_treated;
+    let n_cov = x_arr.as_ref().map_or(0, |xv| xv.ncols());
+
+    // Parallel bootstrap with per-task buffer reuse (same pattern as
+    // bootstrap_trop_variance_full — see comments there).
     let bootstrap_estimates: Vec<f64> = (0..n_bootstrap)
         .into_par_iter()
-        .filter_map(|b| {
-            let iteration_seed = seed.wrapping_add(b as u64);
-            let sampled_units = stratified_sample(&classification, iteration_seed);
+        .fold(
+            || {
+                let x_buf = x_arr.as_ref().map(|xv| {
+                    Array2::<f64>::zeros((n_periods * n_boot_units, xv.ncols()))
+                });
+                let gamma_buf = if n_cov > 0 {
+                    Some(Array1::<f64>::zeros(n_cov))
+                } else {
+                    None
+                };
+                (
+                    Vec::<f64>::new(),
+                    Array2::<f64>::zeros((n_periods, n_boot_units)),
+                    Array2::<f64>::zeros((n_periods, n_boot_units)),
+                    Array2::<u8>::zeros((n_periods, n_boot_units)),
+                    Array2::<f64>::zeros((n_periods, n_boot_units)),
+                    Array1::<f64>::zeros(n_boot_units),
+                    Array1::<f64>::zeros(n_periods),
+                    Array2::<f64>::zeros((n_periods, n_boot_units)),
+                    gamma_buf,
+                    x_buf,
+                )
+            },
+            |(
+                mut results,
+                mut y_buf,
+                mut d_buf,
+                mut mask_buf,
+                mut weight_buf,
+                mut alpha_buf,
+                mut beta_buf,
+                mut l_buf,
+                mut gamma_buf,
+                mut x_buf,
+            ), b| {
+                let iteration_seed = seed.wrapping_add(b as u64);
+                let sampled_units = stratified_sample(&classification, iteration_seed);
 
-            let (y_boot, d_boot, control_mask_boot) = build_bootstrap_matrices_with_mask(
-                &y_arr,
-                &d_arr,
-                &control_mask_arr,
-                &sampled_units,
-            );
-
-            let n_boot_units = d_boot.ncols();
-
-            // Resample X matrix by unit if covariates are present.
-            let x_boot = if let Some(ref x_owned) = x_arr {
-                let n_cov = x_owned.ncols();
-                let n_obs_boot = n_periods * n_boot_units;
-                let mut x_b = Array2::<f64>::zeros((n_obs_boot, n_cov));
-                for (j, &orig_unit) in sampled_units.iter().enumerate() {
-                    for t in 0..n_periods {
-                        let src_idx = t * n_units + orig_unit;
-                        let dst_idx = t * n_boot_units + j;
-                        x_b.row_mut(dst_idx).assign(&x_owned.row(src_idx));
-                    }
-                }
-                Some(x_b)
-            } else {
-                None
-            };
-
-            // Propagate per-unit pweights through the bootstrap resampling:
-            // each resampled column `new_idx` inherits the weight of the
-            // original unit `sampled_units[new_idx]`.
-            let w_boot: Vec<f64> = sampled_units
-                .iter()
-                .map(|&orig_idx| unit_weights_owned.get(orig_idx).copied().unwrap_or(0.0))
-                .collect();
-
-            let mut boot_treated: Vec<(usize, usize)> = Vec::new();
-            for t in 0..n_periods {
-                for i in 0..n_boot_units {
-                    if d_boot[[t, i]] == 1.0 {
-                        boot_treated.push((t, i));
-                    }
-                }
-            }
-
-            if boot_treated.is_empty() {
-                return None;
-            }
-
-            let mut boot_control_units: Vec<usize> = Vec::new();
-            for i in 0..n_boot_units {
-                let is_control = (0..n_periods).all(|t| d_boot[[t, i]] == 0.0);
-                if is_control {
-                    boot_control_units.push(i);
-                }
-            }
-
-            if boot_control_units.is_empty() {
-                return None;
-            }
-
-            let dist_cache = UnitDistanceCache::build(&y_boot.view(), &d_boot.view());
-
-            // Pre-allocate reusable buffers for the treated-observation loop.
-            let mut weight_buf = Array2::<f64>::zeros((n_periods, n_boot_units));
-            let mut alpha_buf = Array1::<f64>::zeros(n_boot_units);
-            let mut beta_buf = Array1::<f64>::zeros(n_periods);
-            let mut l_buf = Array2::<f64>::zeros((n_periods, n_boot_units));
-            let n_cov_boot = x_boot.as_ref().map_or(0, |xb| xb.ncols());
-            let mut gamma_buf = if n_cov_boot > 0 {
-                Some(Array1::<f64>::zeros(n_cov_boot))
-            } else {
-                None
-            };
-
-            let mut tau_cells: Vec<(f64, usize)> = Vec::with_capacity(boot_treated.len());
-
-            // Warm start: reuse previous observation's converged solution.
-            let mut warm_alpha: Option<Array1<f64>> = None;
-            let mut warm_beta: Option<Array1<f64>> = None;
-            let mut warm_l: Option<Array2<f64>> = None;
-
-            for (t, i) in boot_treated {
-                compute_weight_matrix_cached_into(
-                    &mut weight_buf,
-                    &y_boot.view(),
-                    &d_boot.view(),
-                    &dist_cache,
-                    n_periods,
-                    n_boot_units,
-                    i,
-                    t,
-                    lt_eff,
-                    lu_eff,
-                    &time_dist_arr.view(),
+                build_bootstrap_matrices_with_mask_into(
+                    &mut y_buf, &mut d_buf, &mut mask_buf,
+                    &y_arr, &d_arr, &control_mask_arr,
+                    &sampled_units,
                 );
 
-                let ws = match (&warm_alpha, &warm_beta, &warm_l) {
-                    (Some(a), Some(b), Some(l_prev)) => Some((a, b, l_prev)),
-                    _ => None,
-                };
-
-                let x_boot_view = x_boot.as_ref().map(|xb| xb.view());
-                if let Some((_iters, _converged)) = estimate_model_into(
-                    &y_boot.view(),
-                    &control_mask_boot.view(),
-                    &weight_buf.view(),
-                    ln_eff,
-                    n_periods,
-                    n_boot_units,
-                    max_iter,
-                    tol,
-                    None,
-                    ws,
-                    x_boot_view.as_ref(),
-                    None,
-                    &mut alpha_buf,
-                    &mut beta_buf,
-                    &mut l_buf,
-                    gamma_buf.as_mut(),
-                ) {
-                    let mut tau = y_boot[[t, i]] - alpha_buf[i] - beta_buf[t] - l_buf[[t, i]];
-                    if let Some(ref x_b) = x_boot {
-                        if let Some(ref g) = gamma_buf {
-                            let idx = t * n_boot_units + i;
-                            tau -= x_b.row(idx).dot(g);
+                // Resample X matrix by unit if covariates are present.
+                if let (Some(ref x_owned), Some(ref mut xb)) = (&x_arr, &mut x_buf) {
+                    xb.fill(0.0);
+                    for (j, &orig_unit) in sampled_units.iter().enumerate() {
+                        for t in 0..n_periods {
+                            let src_idx = t * n_units + orig_unit;
+                            let dst_idx = t * n_boot_units + j;
+                            xb.row_mut(dst_idx).assign(&x_owned.row(src_idx));
                         }
                     }
-                    if tau.is_finite() {
-                        tau_cells.push((tau, i));
-                    }
-
-                    // Stash converged solution for warm-starting the next observation.
-                    warm_alpha = Some(alpha_buf.clone());
-                    warm_beta = Some(beta_buf.clone());
-                    warm_l = Some(l_buf.clone());
                 }
-            }
 
-            aggregate_att(&tau_cells, Some(&w_boot)).filter(|a| a.is_finite())
-        })
-        .collect();
+                // Propagate per-unit pweights through the bootstrap resampling:
+                // each resampled column `new_idx` inherits the weight of the
+                // original unit `sampled_units[new_idx]`.
+                let w_boot: Vec<f64> = sampled_units
+                    .iter()
+                    .map(|&orig_idx| unit_weights_owned.get(orig_idx).copied().unwrap_or(0.0))
+                    .collect();
+
+                let mut boot_treated: Vec<(usize, usize)> = Vec::new();
+                for t in 0..n_periods {
+                    for i in 0..n_boot_units {
+                        if d_buf[[t, i]] == 1.0 {
+                            boot_treated.push((t, i));
+                        }
+                    }
+                }
+
+                if boot_treated.is_empty() {
+                    return (results, y_buf, d_buf, mask_buf, weight_buf, alpha_buf, beta_buf, l_buf, gamma_buf, x_buf);
+                }
+
+                let mut boot_control_units: Vec<usize> = Vec::new();
+                for i in 0..n_boot_units {
+                    let is_control = (0..n_periods).all(|t| d_buf[[t, i]] == 0.0);
+                    if is_control {
+                        boot_control_units.push(i);
+                    }
+                }
+
+                if boot_control_units.is_empty() {
+                    return (results, y_buf, d_buf, mask_buf, weight_buf, alpha_buf, beta_buf, l_buf, gamma_buf, x_buf);
+                }
+
+                let dist_cache = UnitDistanceCache::build(&y_buf.view(), &d_buf.view());
+
+                let mut tau_cells: Vec<(f64, usize)> = Vec::with_capacity(boot_treated.len());
+
+                // Warm start: reuse previous observation's converged solution.
+                let mut warm_alpha: Option<Array1<f64>> = None;
+                let mut warm_beta: Option<Array1<f64>> = None;
+                let mut warm_l: Option<Array2<f64>> = None;
+
+                for (t, i) in boot_treated {
+                    compute_weight_matrix_cached_into(
+                        &mut weight_buf,
+                        &y_buf.view(),
+                        &d_buf.view(),
+                        &dist_cache,
+                        n_periods,
+                        n_boot_units,
+                        i,
+                        t,
+                        lt_eff,
+                        lu_eff,
+                        &time_dist_arr.view(),
+                    );
+
+                    let ws = match (&warm_alpha, &warm_beta, &warm_l) {
+                        (Some(a), Some(b), Some(l_prev)) => Some((a, b, l_prev)),
+                        _ => None,
+                    };
+
+                    let x_view = x_buf.as_ref().map(|xb| xb.view());
+                    if let Some((_iters, _converged)) = estimate_model_into(
+                        &y_buf.view(),
+                        &mask_buf.view(),
+                        &weight_buf.view(),
+                        ln_eff,
+                        n_periods,
+                        n_boot_units,
+                        max_iter,
+                        tol,
+                        None,
+                        ws,
+                        x_view.as_ref(),
+                        None,
+                        &mut alpha_buf,
+                        &mut beta_buf,
+                        &mut l_buf,
+                        gamma_buf.as_mut(),
+                    ) {
+                        let mut tau = y_buf[[t, i]] - alpha_buf[i] - beta_buf[t] - l_buf[[t, i]];
+                        if let Some(ref xb) = x_buf {
+                            if let Some(ref g) = gamma_buf {
+                                let idx = t * n_boot_units + i;
+                                tau -= xb.row(idx).dot(g);
+                            }
+                        }
+                        if tau.is_finite() {
+                            tau_cells.push((tau, i));
+                        }
+
+                        // Stash converged solution for warm-starting the next observation.
+                        warm_alpha = Some(alpha_buf.clone());
+                        warm_beta = Some(beta_buf.clone());
+                        warm_l = Some(l_buf.clone());
+                    }
+                }
+
+                if let Some(att) = aggregate_att(&tau_cells, Some(&w_boot)).filter(|a| a.is_finite()) {
+                    results.push(att);
+                }
+
+                (results, y_buf, d_buf, mask_buf, weight_buf, alpha_buf, beta_buf, l_buf, gamma_buf, x_buf)
+            },
+        )
+        .map(|(results, ..)| results)
+        .reduce(Vec::new, |mut a, b| { a.extend(b); a });
 
     let n_valid = bootstrap_estimates.len();
 
@@ -1301,69 +1374,117 @@ pub fn bootstrap_trop_variance_joint_full_weighted(
         lambda_nn
     };
 
+    // Stratified sampling always draws n_control + n_treated = n_units columns.
+    let n_boot_units = classification.n_control + classification.n_treated;
+
+    // Parallel bootstrap with per-task buffer reuse (same pattern as
+    // bootstrap_trop_variance_joint_full — see comments there).
     let bootstrap_estimates: Vec<f64> = (0..n_bootstrap)
         .into_par_iter()
-        .filter_map(|b| {
-            let iteration_seed = seed.wrapping_add(b as u64);
-            let sampled_units = stratified_sample(&classification, iteration_seed);
+        .fold(
+            || {
+                let x_buf = x_arr.as_ref().map(|xv| {
+                    Array2::<f64>::zeros((n_periods * n_boot_units, xv.ncols()))
+                });
+                (
+                    Vec::<f64>::new(),
+                    Array2::<f64>::zeros((n_periods, n_boot_units)),
+                    Array2::<f64>::zeros((n_periods, n_boot_units)),
+                    x_buf,
+                )
+            },
+            |(mut results, mut y_buf, mut d_buf, mut x_buf), b| {
+                let iteration_seed = seed.wrapping_add(b as u64);
+                let sampled_units = stratified_sample(&classification, iteration_seed);
 
-            let (y_boot, d_boot) = build_bootstrap_matrices(&y_arr, &d_arr, &sampled_units);
-            let nu_b = y_boot.ncols();
+                build_bootstrap_matrices_into(
+                    &mut y_buf, &mut d_buf,
+                    &y_arr, &d_arr,
+                    &sampled_units,
+                );
 
-            // Resample X matrix by unit if covariates are present.
-            let x_boot = if let Some(ref x_owned) = x_arr {
-                let n_cov = x_owned.ncols();
-                let n_obs_boot = n_periods * nu_b;
-                let mut x_b = Array2::<f64>::zeros((n_obs_boot, n_cov));
-                for (j, &orig_unit) in sampled_units.iter().enumerate() {
-                    for t in 0..n_periods {
-                        let src_idx = t * n_units + orig_unit;
-                        let dst_idx = t * nu_b + j;
-                        x_b.row_mut(dst_idx).assign(&x_owned.row(src_idx));
+                // Resample X matrix by unit if covariates are present.
+                if let (Some(ref x_owned), Some(ref mut xb)) = (&x_arr, &mut x_buf) {
+                    xb.fill(0.0);
+                    for (j, &orig_unit) in sampled_units.iter().enumerate() {
+                        for t in 0..n_periods {
+                            let src_idx = t * n_units + orig_unit;
+                            let dst_idx = t * n_boot_units + j;
+                            xb.row_mut(dst_idx).assign(&x_owned.row(src_idx));
+                        }
                     }
                 }
-                Some(x_b)
-            } else {
-                None
-            };
 
-            let w_boot: Vec<f64> = sampled_units
-                .iter()
-                .map(|&orig_idx| unit_weights_owned.get(orig_idx).copied().unwrap_or(0.0))
-                .collect();
+                let w_boot: Vec<f64> = sampled_units
+                    .iter()
+                    .map(|&orig_idx| unit_weights_owned.get(orig_idx).copied().unwrap_or(0.0))
+                    .collect();
 
-            let delta = compute_joint_weights(
-                &y_boot.view(),
-                &d_boot.view(),
-                lt_eff,
-                lu_eff,
-                treated_periods,
-            );
+                let delta = compute_joint_weights(
+                    &y_buf.view(),
+                    &d_buf.view(),
+                    lt_eff,
+                    lu_eff,
+                    treated_periods,
+                );
 
-            debug_assert_delta_is_1minus_d_masked(
-                &d_boot.view(), &delta.view(),
-                "bootstrap::joint_weighted/delta",
-            );
+                debug_assert_delta_is_1minus_d_masked(
+                    &d_buf.view(), &delta.view(),
+                    "bootstrap::joint_weighted/delta",
+                );
 
-            // Collect (tau, column_index) pairs for weighted aggregation.
-            let x_boot_view = x_boot.as_ref().map(|xb| xb.view());
-            let tau_cells_opt: Option<Vec<(f64, usize)>> = if ln_eff >= 1e10 {
-                solve_joint_no_lowrank(
-                    &y_boot.view(),
-                    &delta.view(),
-                    x_boot_view.as_ref(),
-                ).map(
-                    |(mu, alpha_est, beta, result_gamma)| {
+                // Collect (tau, column_index) pairs for weighted aggregation.
+                let x_view = x_buf.as_ref().map(|xb| xb.view());
+                let tau_cells_opt: Option<Vec<(f64, usize)>> = if ln_eff >= 1e10 {
+                    solve_joint_no_lowrank(
+                        &y_buf.view(),
+                        &delta.view(),
+                        x_view.as_ref(),
+                    ).map(
+                        |(mu, alpha_est, beta, result_gamma)| {
+                            let mut cells: Vec<(f64, usize)> = Vec::new();
+                            for t in 0..n_periods {
+                                for i in 0..n_boot_units {
+                                    if d_buf[[t, i]] == 1.0 && y_buf[[t, i]].is_finite() {
+                                        let mut tau_val =
+                                            y_buf[[t, i]] - mu - alpha_est[i] - beta[t];
+                                        if let Some(ref xb) = x_buf {
+                                            if let Some(ref g) = result_gamma {
+                                                let idx = t * n_boot_units + i;
+                                                tau_val -= xb.row(idx).dot(g);
+                                            }
+                                        }
+                                        cells.push((tau_val, i));
+                                    }
+                                }
+                            }
+                            cells
+                        },
+                    )
+                } else {
+                    solve_joint_with_lowrank(
+                        &y_buf.view(),
+                        &d_buf.view(),
+                        &delta.view(),
+                        ln_eff,
+                        max_iter,
+                        tol,
+                        x_view.as_ref(),
+                    )
+                    .map(|(mu, alpha_est, beta, l, _tau, _iters, _converged, result_gamma)| {
                         let mut cells: Vec<(f64, usize)> = Vec::new();
                         for t in 0..n_periods {
-                            for i in 0..nu_b {
-                                if d_boot[[t, i]] == 1.0 && y_boot[[t, i]].is_finite() {
-                                    let mut tau_val =
-                                        y_boot[[t, i]] - mu - alpha_est[i] - beta[t];
-                                    if let Some(ref x_b) = x_boot {
+                            for i in 0..n_boot_units {
+                                if d_buf[[t, i]] == 1.0 && y_buf[[t, i]].is_finite() {
+                                    let mut tau_val = y_buf[[t, i]]
+                                        - mu
+                                        - alpha_est[i]
+                                        - beta[t]
+                                        - l[[t, i]];
+                                    if let Some(ref xb) = x_buf {
                                         if let Some(ref g) = result_gamma {
-                                            let idx = t * nu_b + i;
-                                            tau_val -= x_b.row(idx).dot(g);
+                                            let idx = t * n_boot_units + i;
+                                            tau_val -= xb.row(idx).dot(g);
                                         }
                                     }
                                     cells.push((tau_val, i));
@@ -1371,47 +1492,21 @@ pub fn bootstrap_trop_variance_joint_full_weighted(
                             }
                         }
                         cells
-                    },
-                )
-            } else {
-                solve_joint_with_lowrank(
-                    &y_boot.view(),
-                    &d_boot.view(),
-                    &delta.view(),
-                    ln_eff,
-                    max_iter,
-                    tol,
-                    x_boot_view.as_ref(),
-                )
-                .map(|(mu, alpha_est, beta, l, _tau, _iters, _converged, result_gamma)| {
-                    let mut cells: Vec<(f64, usize)> = Vec::new();
-                    for t in 0..n_periods {
-                        for i in 0..nu_b {
-                            if d_boot[[t, i]] == 1.0 && y_boot[[t, i]].is_finite() {
-                                let mut tau_val = y_boot[[t, i]]
-                                    - mu
-                                    - alpha_est[i]
-                                    - beta[t]
-                                    - l[[t, i]];
-                                if let Some(ref x_b) = x_boot {
-                                    if let Some(ref g) = result_gamma {
-                                        let idx = t * nu_b + i;
-                                        tau_val -= x_b.row(idx).dot(g);
-                                    }
-                                }
-                                cells.push((tau_val, i));
-                            }
-                        }
-                    }
-                    cells
-                })
-            };
+                    })
+                };
 
-            tau_cells_opt
-                .and_then(|cells| aggregate_att(&cells, Some(&w_boot)))
-                .filter(|a| a.is_finite())
-        })
-        .collect();
+                if let Some(att) = tau_cells_opt
+                    .and_then(|cells| aggregate_att(&cells, Some(&w_boot)))
+                    .filter(|a| a.is_finite())
+                {
+                    results.push(att);
+                }
+
+                (results, y_buf, d_buf, x_buf)
+            },
+        )
+        .map(|(results, _, _, _)| results)
+        .reduce(Vec::new, |mut a, b| { a.extend(b); a });
 
     let n_valid = bootstrap_estimates.len();
 
@@ -1589,6 +1684,12 @@ pub fn bootstrap_trop_variance_rao_wu(
     let lt_eff = if lambda_time.is_infinite() { 0.0 } else { lambda_time };
     let lu_eff = if lambda_unit.is_infinite() { 0.0 } else { lambda_unit };
     let ln_eff = if lambda_nn.is_infinite() { 1e10 } else { lambda_nn };
+
+    // NOTE: Buffer reuse optimization is not applicable here.
+    // Rao-Wu bootstrap fits the model ONCE on the original panel and then
+    // only reweights the pre-computed τ values B times.  No bootstrap
+    // matrices are constructed in the iteration loop, so there are no
+    // per-iteration allocations to eliminate.
 
     // ---- Phase 1: Fit model ONCE, collect per-treated-obs τ values ----
     let dist_cache = UnitDistanceCache::build(y, d);
@@ -1856,6 +1957,11 @@ pub fn bootstrap_trop_variance_rao_wu_joint(
     let lt_eff = if lambda_time.is_infinite() { 0.0 } else { lambda_time };
     let lu_eff = if lambda_unit.is_infinite() { 0.0 } else { lambda_unit };
     let ln_eff = if lambda_nn.is_infinite() { 1e10 } else { lambda_nn };
+
+    // NOTE: Buffer reuse optimization is not applicable here.
+    // Rao-Wu joint bootstrap fits the model ONCE on the original panel and
+    // then only reweights the pre-computed τ values B times.  No bootstrap
+    // matrices are constructed in the iteration loop.
 
     // Determine treated periods for joint weight construction.
     let mut first_treat_period = n_periods;

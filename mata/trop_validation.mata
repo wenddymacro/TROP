@@ -122,4 +122,41 @@ real scalar _trop_chk_common_ctrl_periods(
     return(_mvp)
 }
 
+/*──────────────────────────────────────────────────────────────────────────────
+  _trop_panel_health_check()
+
+  Pre-estimation panel health diagnostics.  Emits warnings for panels
+  that are technically valid but may produce unreliable estimates, and
+  aborts with an error for panels that cannot be estimated at all.
+
+  Arguments
+    n_units       number of cross-sectional units
+    n_periods     number of time periods
+    n_obs         total in-sample observations
+    pct_missing   percentage of outcome cells that are missing (0-100)
+
+  Side effects
+    - Prints warnings for small panels or high missingness
+    - Calls exit(498) if n_periods < 2 (fatal: estimation impossible)
+──────────────────────────────────────────────────────────────────────────────*/
+
+void _trop_panel_health_check(real scalar n_units, real scalar n_periods,
+                              real scalar n_obs, real scalar pct_missing)
+{
+    if (n_periods < 2) {
+        errprintf("Error: At least 2 time periods required (got %g).\n", n_periods)
+        exit(498)
+    }
+    if (n_units < 3) {
+        printf("{txt}Warning: Only %g units detected. Estimates may be unreliable.\n", n_units)
+    }
+    if (pct_missing > 30) {
+        printf("{txt}Warning: %.1f%% missing outcomes detected. Consider data quality.\n", pct_missing)
+    }
+    if (n_obs < n_units * n_periods * 0.5) {
+        printf("{txt}Warning: Panel is less than 50%% balanced (%g obs of %g possible).\n",
+               n_obs, n_units * n_periods)
+    }
+}
+
 end

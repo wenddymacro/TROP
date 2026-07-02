@@ -115,6 +115,16 @@ void trop_log(int level, const char *tag, const char *fmt, ...);
     case cmd_enum: rc = handler(); break;
 
 /* ============================================================================
+ * ABI Version Handshake (P3.3)
+ *
+ * The bridge verifies at first call that the loaded core library exports
+ * the expected ABI version.  A mismatch emits a warning but does not
+ * abort execution (forward-compatible soft check).
+ * ============================================================================ */
+
+#define TROP_EXPECTED_ABI_VERSION 2
+
+/* ============================================================================
  * Core Library FFI Declarations
  *
  * Each function below is implemented in the compiled core library and
@@ -130,6 +140,12 @@ void trop_log(int level, const char *tag, const char *fmt, ...);
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+/**
+ * Returns the ABI version of the compiled core library.
+ * Used for mismatch detection at plugin load time.
+ */
+extern int trop_abi_version(void);
 
 /**
  * LOOCV grid search for the twostep estimator.
@@ -979,6 +995,15 @@ extern int stata_compute_survey_diagnostics(
     int high_fpc_max_elements
 );
 
+/**
+ * Retrieve the last Rust panic message (P1.1).
+ *
+ * Copies at most buf_len-1 bytes of the message into buf and
+ * null-terminates.  Returns number of bytes written (excl. NUL),
+ * or 0 if buf is NULL / buf_len <= 0 / no panic occurred.
+ */
+extern int trop_get_last_panic_message(char *buf, int buf_len);
+
 #ifdef __cplusplus
 }
 #endif
@@ -1173,5 +1198,16 @@ ST_retcode write_matrix_to_stata(
  * @return Condition number (kappa), or NaN if no SVD has been performed.
  */
 extern double stata_get_last_condition_number(void);
+
+/**
+ * stata_get_last_covariate_rcond
+ *
+ * Returns the condition number from the most recent covariate WLS solve
+ * (X'WX system).  Set on both Cholesky and SVD fallback paths, making it
+ * the preferred source for e(condition_number).
+ *
+ * @return Condition number (kappa), or NaN if no covariate solve occurred.
+ */
+extern double stata_get_last_covariate_rcond(void);
 
 #endif /* STATA_BRIDGE_H */

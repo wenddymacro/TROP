@@ -123,6 +123,19 @@ real scalar trop_main(
     n_units = max(panel_idx)
     n_periods = max(time_idx)
     
+    // Panel health check (P3.4): warn on small or sparse panels,
+    // abort if minimum requirements are not met.
+    {
+        real scalar _n_obs, _n_possible, _n_missing_y, _pct_miss
+        real colvector _yvec
+        _n_obs = rows(panel_idx)
+        _n_possible = n_units * n_periods
+        _yvec = st_data(., depvar, touse_var)
+        _n_missing_y = missing(_yvec)
+        _pct_miss = (_n_possible > 0) ? 100 * _n_missing_y / _n_possible : 0
+        _trop_panel_health_check(n_units, n_periods, _n_obs, _pct_miss)
+    }
+    
     // Count treated cells sum(W_{it}) for tau vector pre-allocation
     real colvector d_vec
     real scalar n_treated
@@ -166,7 +179,17 @@ real scalar trop_main(
     if (n_cov == 0) {
         // Ensure the scalar exists even without covariates so the
         // plugin always finds a defined __trop_n_covariates.
-        st_numscalar("__trop_n_covariates", 0)
+        // However, respect an externally-set positive value (the ADO
+        // layer may have already called trop_prepare_covariates() which
+        // sets __trop_n_covariates = p before invoking trop_main()).
+        real matrix _ext_ncov
+        _ext_ncov = st_numscalar("__trop_n_covariates")
+        if (rows(_ext_ncov) == 0 || _ext_ncov <= 0) {
+            st_numscalar("__trop_n_covariates", 0)
+        }
+        else {
+            n_cov = _ext_ncov
+        }
     }
 
     // Optional pweight: validate + write __trop_unit_weights / __trop_use_weights.

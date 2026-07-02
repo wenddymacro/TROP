@@ -6,17 +6,18 @@
 
     The additive model is:
 
-        Y(0) = mu + alpha_i + beta_t + L_{t,i}
+        Y(0) = mu + alpha_i + beta_t + L_{t,i} + X_{t,i}'*gamma
 
     where alpha_i are unit fixed effects, beta_t are time fixed effects,
-    and L_{t,i} is the low-rank interaction component.
+    L_{t,i} is the low-rank interaction component, and X_{t,i}'*gamma is
+    the covariate contribution (zero when no covariates are specified).
 
     Two-step method:
         Treated units:  Y(0) = Y_obs - tau_hat  (exact decomposition)
-        Control units:  Y(0) = alpha_i + beta_t + L_{t,i}
+        Control units:  Y(0) = alpha_i + beta_t + L_{t,i} + X'gamma
 
     Joint method:
-        All units:      Y(0) = mu + alpha_i + beta_t + L_{t,i}
+        All units:      Y(0) = mu + alpha_i + beta_t + L_{t,i} + X'gamma
 
     Required stored estimates:
         e(alpha)          unit fixed effects (N x 1)
@@ -24,6 +25,9 @@
         e(factor_matrix)  low-rank interaction (T x N, column-major)
         e(mu)             intercept (joint method)
         e(tau)            observation-level treatment effects (two-step method)
+        e(gamma)          covariate coefficients (1 x p, optional)
+        e(n_covariates)   number of covariates (scalar, optional)
+        e(covariates)     covariate variable names (string, optional)
 */
 
 
@@ -79,6 +83,7 @@ void _trop_predict_y0(
     real matrix L
     real colvector pred
     real scalar mu, n, i, i_idx, t_idx
+    real colvector xgamma
     
     panel_idx = st_data(., panel_var, touse_var)
     time_idx = st_data(., time_var, touse_var)
@@ -89,12 +94,15 @@ void _trop_predict_y0(
     // T x N low-rank interaction matrix, column-major layout.
     L = st_matrix("e(factor_matrix)")
     
+    // Covariate contribution X*gamma (per observation).
+    xgamma = _trop_predict_xgamma(touse_var)
+    
     n = rows(panel_idx)
     pred = J(n, 1, .)
     
     if (method == "twostep") {
         _trop_predict_y0_twostep(varname, panel_var, time_var, 
-            touse_var, treatvar, depvar, alpha, beta, L, n)
+            touse_var, treatvar, depvar, alpha, beta, L, n, xgamma)
     }
     else {
         // Joint method: reconstruct Y(0) with global intercept.
@@ -112,11 +120,59 @@ void _trop_predict_y0(
             if (t_idx < 1 | t_idx > rows(beta)) continue
             if (t_idx > rows(L) | i_idx > cols(L)) continue
             
-            pred[i] = mu + alpha[i_idx] + beta[t_idx] + L[t_idx, i_idx]
+            pred[i] = mu + alpha[i_idx] + beta[t_idx] + L[t_idx, i_idx] + xgamma[i]
         }
         
         st_store(., varname, touse_var, pred)
     }
+}
+
+/*──────────────────────────────────────────────────────────────────────────────
+  _trop_predict_xgamma()
+
+  Computes the per-observation covariate contribution X*gamma for prediction.
+  Returns a column vector of length n (estimation sample), where each element
+  is sum_k(x_{it,k} * gamma_k).  Returns zeros when no covariates are present.
+──────────────────────────────────────────────────────────────────────────────*/
+
+real colvector _trop_predict_xgamma(string scalar touse_var)
+{
+    real scalar n_cov, k
+    real matrix gamma_mat
+    real colvector xg, xk, touse_data
+    string scalar cov_names_str
+    string rowvector cov_names
+
+    n_cov = st_numscalar("e(n_covariates)")
+    if (n_cov >= . || n_cov < 1) {
+        // No covariates: return zeros sized to the touse sample.
+        touse_data = st_data(., touse_var)
+        return(J(sum(touse_data), 1, 0))
+    }
+
+    gamma_mat = st_matrix("e(gamma)")
+    if (cols(gamma_mat) < n_cov) {
+        // Gamma not available; fall back to zeros.
+        touse_data = st_data(., touse_var)
+        return(J(sum(touse_data), 1, 0))
+    }
+
+    cov_names_str = st_global("e(covariates)")
+    if (cov_names_str == "") {
+        touse_data = st_data(., touse_var)
+        return(J(sum(touse_data), 1, 0))
+    }
+    cov_names = tokens(cov_names_str)
+
+    // Compute X*gamma = sum_k x_k * gamma_k
+    xk = st_data(., cov_names[1], touse_var)
+    xg = xk :* gamma_mat[1, 1]
+    for (k = 2; k <= n_cov; k++) {
+        xk = st_data(., cov_names[k], touse_var)
+        xg = xg :+ xk :* gamma_mat[1, k]
+    }
+
+    return(xg)
 }
 
 void _trop_predict_y0_twostep(
@@ -129,7 +185,8 @@ void _trop_predict_y0_twostep(
     real colvector alpha,
     real colvector beta,
     real matrix L,
-    real scalar n
+    real scalar n,
+    real colvector xgamma
 )
 {
 /*
@@ -170,7 +227,7 @@ void _trop_predict_y0_twostep(
             if (i_idx >= 1 & i_idx <= rows(alpha) & 
                 t_idx >= 1 & t_idx <= rows(beta) &
                 t_idx <= rows(L) & i_idx <= cols(L)) {
-                pred[i] = alpha[i_idx] + beta[t_idx] + L[t_idx, i_idx]
+                pred[i] = alpha[i_idx] + beta[t_idx] + L[t_idx, i_idx] + xgamma[i]
             }
         }
     }
@@ -219,7 +276,7 @@ void _trop_predict_y0_twostep(
                     if (i_idx >= 1 & i_idx <= rows(alpha) & 
                         t_idx >= 1 & t_idx <= rows(beta) &
                         t_idx <= rows(L) & i_idx <= cols(L)) {
-                        pred[i] = alpha[i_idx] + beta[t_idx] + L[t_idx, i_idx]
+                        pred[i] = alpha[i_idx] + beta[t_idx] + L[t_idx, i_idx] + xgamma[i]
                     }
                 }
             }
@@ -234,7 +291,7 @@ void _trop_predict_y0_twostep(
                 if (i_idx >= 1 & i_idx <= rows(alpha) & 
                     t_idx >= 1 & t_idx <= rows(beta) &
                     t_idx <= rows(L) & i_idx <= cols(L)) {
-                    pred[i] = alpha[i_idx] + beta[t_idx] + L[t_idx, i_idx]
+                    pred[i] = alpha[i_idx] + beta[t_idx] + L[t_idx, i_idx] + xgamma[i]
                 }
             }
         }

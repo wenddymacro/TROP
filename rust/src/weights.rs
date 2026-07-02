@@ -19,56 +19,59 @@ use crate::distance::{compute_unit_distance_for_obs, UnitDistanceCache};
 use ndarray::{Array1, Array2, ArrayView2};
 
 // ============================================================================
-// 自适应稀疏权重表示
+// Adaptive sparse weight representation
 // ============================================================================
 
-/// 稀疏权重矩阵：仅存储非零（即权重 >= threshold）的元素。
+/// Sparse weight matrix: stores only non-zero entries (weight >= threshold).
 ///
-/// 当非零权重比例低于 [`SPARSE_THRESHOLD_RATIO`] 时，[`compute_weight_matrix_adaptive`]
-/// 返回该格式，以减少后续 WLS 遍历成本；否则回退到稠密的 [`ndarray::Array2`]。
+/// When the non-zero ratio is below [`SPARSE_THRESHOLD_RATIO`],
+/// [`compute_weight_matrix_adaptive`] returns this format to reduce
+/// subsequent WLS iteration cost; otherwise falls back to dense [`ndarray::Array2`].
 ///
-/// # 字段说明
-/// - `indices`: 非零元素的 `(row, col)` 索引列表
-/// - `values`: 对应权重值，与 `indices` 一一对应
-/// - `n_rows` / `n_cols`: 原矩阵维度（T × N）
-/// - `threshold`: 截断阈值（`max_weight * 1e-6`），用于记录和调试
+/// # Fields
+/// - `indices`: `(row, col)` index list of non-zero entries
+/// - `values`: corresponding weight values, aligned with `indices`
+/// - `n_rows` / `n_cols`: original matrix dimensions (T x N)
+/// - `threshold`: truncation threshold (`max_weight * 1e-6`), for logging/debug
 pub struct SparseWeights {
-    /// `(row, col)` 索引，仅包含权重 >= threshold 的元素
+    /// `(row, col)` indices for entries with weight >= threshold
     pub indices: Vec<(usize, usize)>,
-    /// 对应的权重值，与 `indices` 等长
+    /// Corresponding weight values, same length as `indices`
     pub values: Vec<f64>,
-    /// 原矩阵行数（时间维度 T）
+    /// Number of rows in the original matrix (time dimension T)
     pub n_rows: usize,
-    /// 原矩阵列数（单位维度 N）
+    /// Number of columns in the original matrix (unit dimension N)
     pub n_cols: usize,
-    /// 截断阈值（`max_weight * 1e-6`）
+    /// Truncation threshold (`max_weight * 1e-6`)
     pub threshold: f64,
 }
 
-/// 自适应权重矩阵表示。
+/// Adaptive weight matrix representation.
 ///
-/// 当非零比例 > [`SPARSE_THRESHOLD_RATIO`]（80%）时使用 `Dense` 稠密格式；
-/// 否则使用 `Sparse` 稀疏格式以节省后续迭代开销。
+/// Uses `Dense` format when non-zero ratio > [`SPARSE_THRESHOLD_RATIO`] (80%);
+/// otherwise uses `Sparse` format to save subsequent iteration overhead.
 ///
-/// 对于小面板（N < [`SPARSE_MIN_UNITS`]，默认 100），始终返回 `Dense`，
-/// 因为稀疏索引的管理开销在小规模下得不偿失。
+/// For small panels (N < [`SPARSE_MIN_UNITS`], default 100), always returns
+/// `Dense` because sparse index management overhead is not worthwhile at
+/// small scale.
 pub enum WeightMatrix {
-    /// 稠密格式：完整的 T × N 矩阵
+    /// Dense format: full T x N matrix
     Dense(Array2<f64>),
-    /// 稀疏格式：仅保存非零元素
+    /// Sparse format: stores only non-zero entries
     Sparse(SparseWeights),
 }
 
-/// 非零权重比例阈值：超过此比例时回退到稠密格式。
+/// Non-zero weight ratio threshold: falls back to dense when exceeded.
 ///
-/// 当非零权重占全部元素的比例 > 80% 时，稀疏索引结构带来的内存节省
-/// 不足以抵消随机访问开销，因此使用稠密矩阵。
+/// When the ratio of non-zero weights to total elements exceeds 80%, the
+/// memory savings from sparse indexing are insufficient to offset random
+/// access overhead, so the dense matrix is used.
 pub const SPARSE_THRESHOLD_RATIO: f64 = 0.80;
 
-/// 启用稀疏路径的最小单位数。
+/// Minimum unit count to enable the sparse path.
 ///
-/// N < 100 的小面板始终使用稠密格式：稀疏索引的分配和遍历
-/// 在小规模下得不偿失。
+/// Panels with N < 100 always use dense format: sparse index allocation
+/// and traversal are not cost-effective at small scale.
 pub const SPARSE_MIN_UNITS: usize = 100;
 
 /// Compute the per-observation weight matrix for the Twostep method.
@@ -594,26 +597,28 @@ pub fn compute_joint_weight_vectors(
 }
 
 // ============================================================================
-// 自适应稀疏权重计算
+// Adaptive sparse weight computation
 // ============================================================================
 
-/// 自适应计算 Twostep 方法的观测级权重矩阵，根据稀疏程度自动选择存储格式。
+/// Adaptively compute per-observation weight matrix for the Twostep method,
+/// automatically selecting storage format based on sparsity.
 ///
-/// 与 [`compute_weight_matrix`] 使用相同的计算逻辑，但增加了自适应稀疏路径：
+/// Uses the same computation logic as [`compute_weight_matrix`], but adds an
+/// adaptive sparse path:
 ///
-/// 1. 先计算全部权重向量（θ_time, ω_unit）
-/// 2. 找到 `max_weight = max(θ_s) * max(ω_j)`
-/// 3. 设定截断阈值 `threshold = max_weight * 1e-6`
-/// 4. 统计 >= threshold 的元素占比：
-///    - 如果 N < [`SPARSE_MIN_UNITS`]（100），始终返回 `Dense`（小面板稀疏开销不值）
-///    - 如果非零比例 > [`SPARSE_THRESHOLD_RATIO`]（80%），返回 `Dense`
-///    - 否则返回 `Sparse`（仅保存非零元素）
+/// 1. Compute full weight vectors (theta_time, omega_unit)
+/// 2. Find `max_weight = max(theta_s) * max(omega_j)`
+/// 3. Set truncation threshold `threshold = max_weight * 1e-6`
+/// 4. Count entries >= threshold:
+///    - If N < [`SPARSE_MIN_UNITS`] (100), always return `Dense` (overhead not worth it)
+///    - If non-zero ratio > [`SPARSE_THRESHOLD_RATIO`] (80%), return `Dense`
+///    - Otherwise return `Sparse` (stores only non-zero entries)
 ///
 /// # Arguments
-/// 与 [`compute_weight_matrix`] 相同。
+/// Same as [`compute_weight_matrix`].
 ///
 /// # Returns
-/// [`WeightMatrix::Dense`] 或 [`WeightMatrix::Sparse`]，内容数值上等价。
+/// [`WeightMatrix::Dense`] or [`WeightMatrix::Sparse`], numerically equivalent.
 #[allow(clippy::too_many_arguments)]
 pub fn compute_weight_matrix_adaptive(
     y: &ArrayView2<f64>,
@@ -631,13 +636,13 @@ pub fn compute_weight_matrix_adaptive(
         lambda_time, lambda_unit, time_dist,
     );
 
-    // 计算最大权重以确定截断阈值
+    // Compute max weight to determine truncation threshold
     let max_time = time_weights.iter().cloned().fold(0.0_f64, f64::max);
     let max_unit = unit_weights.iter().cloned().fold(0.0_f64, f64::max);
     let max_weight = max_time * max_unit;
     let threshold = if max_weight > 0.0 { max_weight * 1e-6 } else { 0.0 };
 
-    // 小面板：始终返回稠密格式（稀疏索引开销不值得）
+    // Small panels: always return dense (sparse overhead not worthwhile)
     if n_units < SPARSE_MIN_UNITS {
         let mut buf = Array2::<f64>::zeros((n_periods, n_units));
         for t in 0..n_periods {
@@ -650,7 +655,7 @@ pub fn compute_weight_matrix_adaptive(
 
     let total_elements = n_periods * n_units;
 
-    // 预先计算非零元素数量以判断是否值得稀疏化
+    // Pre-count non-zero elements to decide whether sparse format is worthwhile
     let nnz = time_weights
         .iter()
         .flat_map(|&tw| {
@@ -662,7 +667,7 @@ pub fn compute_weight_matrix_adaptive(
     let nonzero_ratio = nnz as f64 / total_elements as f64;
 
     if nonzero_ratio > SPARSE_THRESHOLD_RATIO {
-        // 稠密路径：非零比例过高，直接返回完整矩阵
+        // Dense path: non-zero ratio too high, return full matrix
         let mut buf = Array2::<f64>::zeros((n_periods, n_units));
         for t in 0..n_periods {
             for i in 0..n_units {
@@ -671,7 +676,7 @@ pub fn compute_weight_matrix_adaptive(
         }
         WeightMatrix::Dense(buf)
     } else {
-        // 稀疏路径：仅保存 >= threshold 的元素
+        // Sparse path: store only entries >= threshold
         let mut indices = Vec::with_capacity(nnz);
         let mut values = Vec::with_capacity(nnz);
         for t in 0..n_periods {
@@ -693,10 +698,11 @@ pub fn compute_weight_matrix_adaptive(
     }
 }
 
-/// 自适应计算 Twostep 方法的观测级权重矩阵（使用预构建距离缓存）。
+/// Adaptively compute per-observation weight matrix using pre-built distance cache.
 ///
-/// 与 [`compute_weight_matrix_adaptive`] 逻辑相同，但通过 [`UnitDistanceCache`]
-/// 跳过逐次 O(T) 距离计算，适合在 LOOCV / bootstrap 热循环中使用。
+/// Same logic as [`compute_weight_matrix_adaptive`], but leverages
+/// [`UnitDistanceCache`] to skip per-query O(T) distance computation,
+/// suitable for use in LOOCV / bootstrap hot loops.
 #[allow(clippy::too_many_arguments)]
 pub fn compute_weight_matrix_adaptive_cached(
     y: &ArrayView2<f64>,
@@ -1745,7 +1751,7 @@ mod tests {
 }
 
 // ============================================================================
-// 自适应稀疏权重专项测试
+// Adaptive sparse weight dedicated tests
 // ============================================================================
 
 #[cfg(test)]
@@ -1753,13 +1759,13 @@ mod sparse_tests {
     use super::*;
     use ndarray::array;
 
-    /// 构建旨在触发稀疏路径的大面板： N >= SPARSE_MIN_UNITS。
-    /// 使用大 lambda (快速衰减) 确保大量权重接近零。
+    /// Build a large panel designed to trigger the sparse path: N >= SPARSE_MIN_UNITS.
+    /// Uses large lambda (fast decay) to ensure many weights are near zero.
     fn build_large_panel_views(
         n_periods: usize,
         n_units: usize,
     ) -> (ndarray::Array2<f64>, ndarray::Array2<f64>, ndarray::Array2<i64>) {
-        // Y 为简单线性面板，全部为控制观测
+        // Y is a simple linear panel, all control observations
         let y = ndarray::Array2::from_shape_fn((n_periods, n_units), |(t, i)| {
             (t as f64) * 0.1 + (i as f64) * 0.01
         });
@@ -1770,31 +1776,31 @@ mod sparse_tests {
         (y, d, time_dist)
     }
 
-    /// 小 lambda 时，权重天壶均匀，自适应路径应返回 Dense。
+    /// With small lambda, weights are nearly uniform; adaptive path should return Dense.
     #[test]
     fn test_adaptive_small_lambda_returns_dense() {
         let n_periods = 5;
-        let n_units = 3; // 小于 SPARSE_MIN_UNITS, 始终返回 Dense
+        let n_units = 3; // less than SPARSE_MIN_UNITS, always returns Dense
         let (y, d, time_dist) = build_large_panel_views(n_periods, n_units);
 
         let result = compute_weight_matrix_adaptive(
             &y.view(), &d.view(),
             n_periods, n_units, 0, 1,
-            0.0, 0.0, // lambda = 0 → 均匀权重
+            0.0, 0.0, // lambda = 0 -> uniform weights
             &time_dist.view(),
         );
 
         assert!(
             matches!(result, WeightMatrix::Dense(_)),
-            "小面板 (N < SPARSE_MIN_UNITS) 应始终返回 Dense"
+            "small panel (N < SPARSE_MIN_UNITS) should always return Dense"
         );
     }
 
-    /// 小面板 (N < SPARSE_MIN_UNITS) 应始终返回 Dense，无论 lambda 多大。
+    /// Small panel (N < SPARSE_MIN_UNITS) should always return Dense regardless of lambda.
     #[test]
     fn test_adaptive_small_panel_always_dense() {
         let n_periods = 5;
-        let n_units = 3; // 小于 100
+        let n_units = 3; // less than 100
         let (y, d, time_dist) = build_large_panel_views(n_periods, n_units);
 
         for &lambda in &[0.0_f64, 1.0, 10.0, 100.0] {
@@ -1806,15 +1812,15 @@ mod sparse_tests {
             );
             assert!(
                 matches!(result, WeightMatrix::Dense(_)),
-                "小面板 (N={}) 应始终返回 Dense, lambda={}",
+                "small panel (N={}) should always return Dense, lambda={}",
                 n_units, lambda
             );
         }
     }
 
-    /// Dense 路径与稀疏路径均与原始 [`compute_weight_matrix`] 数値一致。
+    /// Dense and sparse paths both produce numerically identical results to [`compute_weight_matrix`].
     ///
-    /// 针对 N < SPARSE_MIN_UNITS 的小面板，验证 Dense 路径的数値等价性。
+    /// For small panels (N < SPARSE_MIN_UNITS), verify Dense path numerical equivalence.
     #[test]
     fn test_adaptive_dense_path_matches_original() {
         let y = array![
@@ -1845,26 +1851,28 @@ mod sparse_tests {
                     for i in 0..3 {
                         assert!(
                             (mat[[t, i]] - expected[[t, i]]).abs() < 1e-10,
-                            "Dense 路径数値不匹配原始函数在 [{}, {}]: {} vs {}",
+                            "Dense path mismatch at [{}, {}]: {} vs {}",
                             t, i, mat[[t, i]], expected[[t, i]]
                         );
                     }
                 }
             }
             WeightMatrix::Sparse(sparse) => {
-                // 小面板必须是 Dense，此分支不应被达到
+                // Small panel must be Dense; this branch should not be reached
                 panic!(
-                    "小面板 (N=3 < SPARSE_MIN_UNITS) 不应返回 Sparse，但 nnz={}",
+                    "small panel (N=3 < SPARSE_MIN_UNITS) should not return Sparse, but nnz={}",
                     sparse.indices.len()
                 );
             }
         }
     }
 
-    /// 适应性稀疏路径的数値等价性：展开 SparseWeights 应与稠密路径内容相同。
+    /// Adaptive sparse path numerical equivalence: expanded SparseWeights should
+    /// match dense path content.
     ///
-    /// 构造一个 N=110 的大面板（>= SPARSE_MIN_UNITS），使用大 lambda
-    /// 建少非零元素占比，验证稀疏展开应与稠密结果相同（误差 < 1e-10）。
+    /// Constructs a large panel with N=110 (>= SPARSE_MIN_UNITS), uses large lambda
+    /// to reduce non-zero element ratio, verifies sparse expansion matches dense
+    /// result (tolerance < 1e-10).
     #[test]
     fn test_adaptive_sparse_dense_numerical_equivalence() {
         let n_periods = 8;
@@ -1880,7 +1888,7 @@ mod sparse_tests {
             (t as i64 - s as i64).abs()
         });
 
-        // 使用大 lambda 以制造稀疏矩阵
+        // Use large lambda to produce a sparse matrix
         let lambda_time = 5.0;
         let lambda_unit = 5.0;
 
@@ -1896,7 +1904,7 @@ mod sparse_tests {
             lambda_time, lambda_unit, &time_dist.view(),
         );
 
-        // 将自适应结果展开为稠密矩阵进行比较，同时记录截断阈值
+        // Expand adaptive result to dense matrix for comparison, recording truncation threshold
         let (adaptive_dense, sparse_threshold) = match adaptive {
             WeightMatrix::Dense(m) => (m, 0.0),
             WeightMatrix::Sparse(ref sp) => {
@@ -1913,18 +1921,18 @@ mod sparse_tests {
                 let diff = (adaptive_dense[[t, i]] - dense_ref[[t, i]]).abs();
                 let ref_val = dense_ref[[t, i]];
                 if ref_val >= sparse_threshold {
-                    // 非截断元素必须精确等价（误差 < 1e-10）
+                    // Non-truncated elements must be exactly equivalent (tolerance < 1e-10)
                     assert!(
                         diff < 1e-10,
-                        "稀疏展开在 [{}, {}] 数値不匹配: adaptive={}, ref={}",
+                        "sparse expansion mismatch at [{}, {}]: adaptive={}, ref={}",
                         t, i, adaptive_dense[[t, i]], ref_val
                     );
                 } else {
-                    // 被截断的微小元素：diff 至多等于 ref_val 本身
-                    // （稀疏存储为 0，稠密存储了微小但合法的值）
+                    // Truncated tiny elements: diff is at most ref_val itself
+                    // (sparse stores 0, dense stores a tiny but valid value)
                     assert!(
                         diff <= ref_val + 1e-15,
-                        "稀疏展开在 [{}, {}] 截断残差过大: diff={}, ref={}",
+                        "sparse expansion truncation residual too large at [{}, {}]: diff={}, ref={}",
                         t, i, diff, ref_val
                     );
                 }
@@ -1932,7 +1940,7 @@ mod sparse_tests {
         }
     }
 
-    /// SparseWeights 的元数据完整性检查。
+    /// SparseWeights metadata consistency check.
     #[test]
     fn test_sparse_weights_metadata_consistency() {
         let n_periods = 8;
@@ -1942,48 +1950,48 @@ mod sparse_tests {
         let result = compute_weight_matrix_adaptive(
             &y.view(), &d.view(),
             n_periods, n_units, 0, 4,
-            5.0, 5.0, // 大 lambda 以制造稀疏路径
+            5.0, 5.0, // large lambda to trigger sparse path
             &time_dist.view(),
         );
 
         match result {
             WeightMatrix::Dense(_) => {
-                // 小 lambda 下或非零比例 > 80% 时会是 Dense，不算错误
+                // With small lambda or non-zero ratio > 80% this will be Dense, not an error
             }
             WeightMatrix::Sparse(sp) => {
-                // indices 与 values 等长
+                // indices and values must be same length
                 assert_eq!(
                     sp.indices.len(), sp.values.len(),
-                    "SparseWeights: indices 与 values 长度必须相等"
+                    "SparseWeights: indices and values must have equal length"
                 );
-                // n_rows 、n_cols 必须匹配原始维度
+                // n_rows, n_cols must match original dimensions
                 assert_eq!(sp.n_rows, n_periods);
                 assert_eq!(sp.n_cols, n_units);
-                // 所有存储的权重必须 >= threshold
+                // All stored weights must be >= threshold
                 for &v in &sp.values {
                     assert!(
                         v >= sp.threshold,
-                        "存储权重 {} 应 >= 阈值 {}",
+                        "stored weight {} should be >= threshold {}",
                         v, sp.threshold
                     );
                 }
-                // 所有权重非负
+                // All weights non-negative
                 for &v in &sp.values {
-                    assert!(v >= 0.0, "稀疏权重应非负: {}", v);
+                    assert!(v >= 0.0, "sparse weight should be non-negative: {}", v);
                 }
-                // 索引在范围内
+                // Indices within bounds
                 for &(r, c) in &sp.indices {
-                    assert!(r < n_periods, "行索引越界: r={}", r);
-                    assert!(c < n_units, "列索引越界: c={}", c);
+                    assert!(r < n_periods, "row index out of bounds: r={}", r);
+                    assert!(c < n_units, "col index out of bounds: c={}", c);
                 }
             }
         }
     }
 
-    /// WeightMatrix::Dense 和 Sparse 路径均应产生相同的 ATT 估计。
+    /// WeightMatrix::Dense and Sparse paths should both produce the same ATT estimate.
     ///
-    /// 通过 [`estimate_model_adaptive`] 验证稀疏路径与稠密路径的数値等价性，
-    /// 误差容限 < 1e-10。
+    /// Verifies numerical equivalence between sparse and dense paths via
+    /// [`estimate_model_adaptive`], tolerance < 1e-10.
     #[test]
     fn test_estimate_model_sparse_dense_att_equivalence() {
         use crate::estimation::estimate_model;
@@ -2006,7 +2014,7 @@ mod sparse_tests {
         });
         let time_dist = array![[0i64, 1, 2, 3], [1, 0, 1, 2], [2, 1, 0, 1], [3, 2, 1, 0]];
 
-        // Dense 权重矩阵
+        // Dense weight matrix
         let w_dense = compute_weight_matrix(
             &y.view(), &d.view(), 4, 3, 2, 3, 0.5, 0.5, &time_dist.view(),
         );
@@ -2014,9 +2022,9 @@ mod sparse_tests {
         let (alpha_d, beta_d, l_d, _, _, _) = estimate_model(
             &y.view(), &control_mask.view(), &w_dense.view(),
             0.1, 4, 3, 50, 1e-8, None, None, None, None,
-        ).expect("稠密估计应成功");
+        ).expect("dense estimation should succeed");
 
-        // 自适应路径（小面板必为 Dense）
+        // Adaptive path (small panel must be Dense)
         let w_adaptive = compute_weight_matrix_adaptive(
             &y.view(), &d.view(), 4, 3, 2, 3, 0.5, 0.5, &time_dist.view(),
         );
@@ -2024,9 +2032,9 @@ mod sparse_tests {
         let (alpha_a, beta_a, l_a, _, _, _) = crate::estimation::estimate_model_adaptive(
             &y.view(), &control_mask.view(), &w_adaptive,
             0.1, 4, 3, 50, 1e-8, None, None, None, None,
-        ).expect("自适应估计应成功");
+        ).expect("adaptive estimation should succeed");
 
-        // 计算两者 ATT
+        // Compute ATT for both
         let att_dense: f64 = (0..4).flat_map(|t| (0..3).map(move |i| (t, i)))
             .filter(|&(t, i)| d[[t, i]] == 1.0)
             .map(|(t, i)| y[[t, i]] - alpha_d[i] - beta_d[t] - l_d[[t, i]])
@@ -2039,7 +2047,7 @@ mod sparse_tests {
 
         assert!(
             (att_dense - att_adaptive).abs() < 1e-10,
-            "稠密与自适应 ATT 应相等: dense={}, adaptive={}",
+            "dense and adaptive ATT should be equal: dense={}, adaptive={}",
             att_dense, att_adaptive
         );
     }

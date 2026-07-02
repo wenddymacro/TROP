@@ -23,7 +23,16 @@ pub use error::{TropError, TropResult};
 
 use ndarray::{Array1, Array2, ArrayView2, ShapeBuilder};
 use rayon::prelude::*;
+use std::cell::RefCell;
 use std::slice;
+
+// ---------------------------------------------------------------------------
+// Thread-local panic message buffer (P1.1)
+// ---------------------------------------------------------------------------
+
+thread_local! {
+    static LAST_PANIC_MESSAGE: RefCell<String> = RefCell::new(String::new());
+}
 
 // ---------------------------------------------------------------------------
 // Column-major pointer conversion helpers
@@ -74,13 +83,78 @@ unsafe fn array2_to_ptr(arr: &Array2<f64>, ptr: *mut f64) {
 }
 
 /// Catches any unwinding panic inside `$body` and converts it to an error code.
+/// Stores the panic message in a thread-local buffer accessible via
+/// `trop_get_last_panic_message` (P1.1).
 macro_rules! catch_panic {
-    ($body:expr) => {
-        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| $body)) {
-            Ok(result) => result,
-            Err(_) => TropError::RustPanic.code(),
+    ($body:expr) => {{
+        // Clear previous panic message at entry
+        LAST_PANIC_MESSAGE.with(|m| m.borrow_mut().clear());
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| $body));
+        match result {
+            Ok(r) => r,
+            Err(panic_info) => {
+                let msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
+                    s.to_string()
+                } else if let Some(s) = panic_info.downcast_ref::<String>() {
+                    s.clone()
+                } else {
+                    "unknown panic".to_string()
+                };
+                LAST_PANIC_MESSAGE.with(|m| {
+                    *m.borrow_mut() = msg;
+                });
+                TropError::RustPanic.code()
+            }
         }
-    };
+    }};
+}
+
+// ---------------------------------------------------------------------------
+// ABI version handshake (P3.3)
+// ---------------------------------------------------------------------------
+
+/// Returns the ABI version of this compiled library.
+///
+/// The C bridge calls this at first invocation to verify that the plugin and
+/// dynamic library were compiled from the same source revision.  The check is
+/// soft — a mismatch emits a warning but does not abort, so stale
+/// `.dylib`/`.so` files produce a diagnostic rather than a hard failure.
+#[no_mangle]
+pub extern "C" fn trop_abi_version() -> i32 {
+    2
+}
+
+// ---------------------------------------------------------------------------
+// Panic message retrieval (P1.1 FFI export)
+// ---------------------------------------------------------------------------
+
+/// Retrieve the last Rust panic message captured by `catch_panic!`.
+///
+/// Copies at most `buf_len - 1` bytes of the message into `buf` and
+/// null-terminates it.  Returns the actual number of bytes written
+/// (excluding the null terminator), or 0 if `buf` is null / `buf_len <= 0`.
+///
+/// An empty string (return value 0 with valid buffer) indicates that no
+/// panic has occurred on this thread since the last invocation.
+///
+/// # Safety
+/// `buf` must point to a writable buffer of at least `buf_len` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn trop_get_last_panic_message(
+    buf: *mut std::os::raw::c_char,
+    buf_len: i32,
+) -> i32 {
+    if buf.is_null() || buf_len <= 0 {
+        return 0;
+    }
+    LAST_PANIC_MESSAGE.with(|m| {
+        let msg = m.borrow();
+        let bytes = msg.as_bytes();
+        let copy_len = std::cmp::min(bytes.len(), (buf_len - 1) as usize);
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), buf as *mut u8, copy_len);
+        *buf.add(copy_len) = 0; // null terminator
+        copy_len as i32
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -3360,6 +3434,27 @@ pub unsafe extern "C" fn stata_compute_survey_diagnostics(
 #[no_mangle]
 pub extern "C" fn stata_get_last_condition_number() -> f64 {
     estimation::LAST_CONDITION_NUMBER.with(|c| c.get())
+}
+
+/// Returns the inverse condition number (rcond) from the most recent
+/// covariate WLS solve (X'WX system).
+///
+/// Only set to a finite value when the SVD fallback path is triggered
+/// (i.e., Cholesky factorization of X'WX failed due to near-singularity).
+/// On the Cholesky success path this returns `NaN` because the singular
+/// values are not computed and no reliable condition estimate is available.
+///
+/// Returns `NaN` if:
+/// - No covariate solve has been performed on the current thread, or
+/// - The solve succeeded via Cholesky (condition number not computed), or
+/// - No covariates were specified in the model.
+///
+/// **Distinction from [`stata_get_last_condition_number`]:** that function
+/// records the condition number of the *main model* SVD in `solve_lstsq_small`;
+/// this function tracks only the covariate sub-problem (γ WLS).
+#[no_mangle]
+pub extern "C" fn stata_get_last_covariate_rcond() -> f64 {
+    estimation::LAST_COVARIATE_RCOND.with(|c| c.get())
 }
 
 #[cfg(test)]

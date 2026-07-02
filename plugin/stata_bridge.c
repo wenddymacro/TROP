@@ -104,10 +104,90 @@ static const char* get_error_message(int code) {
 void translate_error_code(int rust_code) {
     if (rust_code == TROP_SUCCESS) return;
     
-    char msg[256];
+    char msg[512];
     snprintf(msg, sizeof(msg), "{err}TROP error %d: %s{txt}\n",
              rust_code, get_error_message(rust_code));
     SF_display(msg);
+
+    /* P1.1: If the error is a Rust panic, retrieve and display the message */
+    if (rust_code == TROP_ERR_RUST_PANIC) {
+        char panic_buf[512];
+        int len = trop_get_last_panic_message(panic_buf, (int)sizeof(panic_buf));
+        if (len > 0) {
+            char detail[600];
+            snprintf(detail, sizeof(detail), "{err}  panic detail: %s{txt}\n", panic_buf);
+            SF_display(detail);
+        }
+    }
+}
+
+/* ============================================================================
+ * P1.2: RAII-style allocation context for handler functions.
+ *
+ * Consolidates all heap pointers into a single struct so that a single
+ * cleanup_alloc() call releases everything, preventing leaks when an
+ * intermediate malloc fails.
+ * ============================================================================ */
+
+/**
+ * AllocContext - Aggregated heap allocation tracker.
+ *
+ * Each handler function declares one AllocContext ctx = {0} on the stack.
+ * All dynamically allocated buffers (Y, D, control_mask, grids, outputs) are
+ * stored as members. On any error or at normal exit, a single call to
+ * cleanup_alloc(&ctx) frees every non-NULL pointer and NULLs the slot,
+ * making double-free impossible.
+ */
+typedef struct {
+    double        *y_matrix;
+    double        *d_matrix;
+    unsigned char *control_mask;
+    int64_t       *time_dist;
+    double        *lambda_time_grid;
+    double        *lambda_unit_grid;
+    double        *lambda_nn_grid;
+    double        *x_buf;
+    double        *tau;
+    double        *alpha;
+    double        *beta;
+    double        *l_matrix;
+    double        *tau_vec;
+    int           *converged_by_obs;
+    int           *n_iters_by_obs;
+    double        *unit_weights;
+    double        *gamma_buf;
+    double        *estimates;
+    double        *dist_matrix;
+} AllocContext;
+
+/**
+ * cleanup_alloc - Release all heap buffers tracked by an AllocContext.
+ *
+ * Iterates over every pointer member; frees non-NULL entries and resets them
+ * to NULL so the context can be safely re-used or re-freed without undefined
+ * behavior. Called in the cleanup: label of each handler (goto-based RAII).
+ */
+static void cleanup_alloc(AllocContext *ctx) {
+    if (!ctx) return;
+    if (ctx->y_matrix)        { free(ctx->y_matrix);        ctx->y_matrix = NULL; }
+    if (ctx->d_matrix)        { free(ctx->d_matrix);        ctx->d_matrix = NULL; }
+    if (ctx->control_mask)    { free(ctx->control_mask);    ctx->control_mask = NULL; }
+    if (ctx->time_dist)       { free(ctx->time_dist);       ctx->time_dist = NULL; }
+    if (ctx->lambda_time_grid){ free(ctx->lambda_time_grid); ctx->lambda_time_grid = NULL; }
+    if (ctx->lambda_unit_grid){ free(ctx->lambda_unit_grid); ctx->lambda_unit_grid = NULL; }
+    if (ctx->lambda_nn_grid)  { free(ctx->lambda_nn_grid);  ctx->lambda_nn_grid = NULL; }
+    if (ctx->x_buf)           { free(ctx->x_buf);           ctx->x_buf = NULL; }
+    if (ctx->tau)             { free(ctx->tau);             ctx->tau = NULL; }
+    if (ctx->alpha)           { free(ctx->alpha);           ctx->alpha = NULL; }
+    if (ctx->beta)            { free(ctx->beta);            ctx->beta = NULL; }
+    if (ctx->l_matrix)        { free(ctx->l_matrix);        ctx->l_matrix = NULL; }
+    if (ctx->tau_vec)         { free(ctx->tau_vec);         ctx->tau_vec = NULL; }
+    if (ctx->converged_by_obs){ free(ctx->converged_by_obs); ctx->converged_by_obs = NULL; }
+    if (ctx->n_iters_by_obs)  { free(ctx->n_iters_by_obs);  ctx->n_iters_by_obs = NULL; }
+    if (ctx->unit_weights)    { free(ctx->unit_weights);    ctx->unit_weights = NULL; }
+    if (ctx->gamma_buf)       { free(ctx->gamma_buf);       ctx->gamma_buf = NULL; }
+    if (ctx->estimates)       { free(ctx->estimates);       ctx->estimates = NULL; }
+    if (ctx->dist_matrix)     { free(ctx->dist_matrix);     ctx->dist_matrix = NULL; }
 }
 
 /* ============================================================================
@@ -636,15 +716,8 @@ ST_retcode write_matrix_to_stata(
  * ============================================================================ */
 
 static ST_retcode handle_loocv_twostep(void) {
+    AllocContext ctx = {0};  /* P1.2: RAII context */
     ST_int n_units, n_periods;
-    double *y_matrix = NULL;
-    double *d_matrix = NULL;
-    unsigned char *control_mask = NULL;
-    int64_t *time_dist = NULL;
-    double *lambda_time_grid = NULL;
-    double *lambda_unit_grid = NULL;
-    double *lambda_nn_grid = NULL;
-    double *x_buf = NULL;
     int lambda_time_len, lambda_unit_len, lambda_nn_len;
     int n_covariates = 0;
     double max_iter_d, tol;
@@ -676,13 +749,13 @@ static ST_retcode handle_loocv_twostep(void) {
     rc = read_dimensions(&n_units, &n_periods);
     if (rc != TROP_SUCCESS) goto cleanup;
     
-    /* Allocate memory */
-    y_matrix = (double *)malloc(n_units * n_periods * sizeof(double));
-    d_matrix = (double *)malloc(n_units * n_periods * sizeof(double));
-    control_mask = (unsigned char *)malloc(n_units * n_periods);
-    time_dist = (int64_t *)malloc(n_periods * n_periods * sizeof(int64_t));
+    /* Allocate memory (via AllocContext) */
+    ctx.y_matrix = (double *)malloc(n_units * n_periods * sizeof(double));
+    ctx.d_matrix = (double *)malloc(n_units * n_periods * sizeof(double));
+    ctx.control_mask = (unsigned char *)malloc(n_units * n_periods);
+    ctx.time_dist = (int64_t *)malloc(n_periods * n_periods * sizeof(int64_t));
     
-    if (!y_matrix || !d_matrix || !control_mask || !time_dist) {
+    if (!ctx.y_matrix || !ctx.d_matrix || !ctx.control_mask || !ctx.time_dist) {
         TROP_LOG_ERROR("memory allocation failed");
         rc = TROP_ERR_MEMORY;
         goto cleanup;
@@ -694,30 +767,30 @@ static ST_retcode handle_loocv_twostep(void) {
     SF_scal_use("__trop_d_varindex", &d_idx_d);
     SF_scal_use("__trop_ctrl_varindex", &ctrl_idx_d);
     
-    rc = read_panel_pair_to_matrices((ST_int)y_idx_d, (ST_int)d_idx_d, n_periods, n_units, y_matrix, d_matrix);
+    rc = read_panel_pair_to_matrices((ST_int)y_idx_d, (ST_int)d_idx_d, n_periods, n_units, ctx.y_matrix, ctx.d_matrix);
     if (rc != TROP_SUCCESS) goto cleanup;
     
-    rc = read_control_mask((ST_int)ctrl_idx_d, n_periods, n_units, control_mask);
+    rc = read_control_mask((ST_int)ctrl_idx_d, n_periods, n_units, ctx.control_mask);
     if (rc != TROP_SUCCESS) goto cleanup;
     
     /* Read time distance matrix */
-    rc = read_time_dist_matrix("__trop_time_dist", n_periods, time_dist);
+    rc = read_time_dist_matrix("__trop_time_dist", n_periods, ctx.time_dist);
     if (rc != TROP_SUCCESS) goto cleanup;
     
     /* Read lambda grids */
-    rc = read_lambda_grid("__trop_lambda_time_grid", &lambda_time_grid, &lambda_time_len);
+    rc = read_lambda_grid("__trop_lambda_time_grid", &ctx.lambda_time_grid, &lambda_time_len);
     if (rc != TROP_SUCCESS) goto cleanup;
     
-    rc = read_lambda_grid("__trop_lambda_unit_grid", &lambda_unit_grid, &lambda_unit_len);
+    rc = read_lambda_grid("__trop_lambda_unit_grid", &ctx.lambda_unit_grid, &lambda_unit_len);
     if (rc != TROP_SUCCESS) goto cleanup;
     
-    rc = read_lambda_grid("__trop_lambda_nn_grid", &lambda_nn_grid, &lambda_nn_len);
+    rc = read_lambda_grid("__trop_lambda_nn_grid", &ctx.lambda_nn_grid, &lambda_nn_len);
     if (rc != TROP_SUCCESS) goto cleanup;
     
     /* Convert infinity sentinel values in grids */
-    convert_lambda_infinity(lambda_time_grid, lambda_time_len, "time");
-    convert_lambda_infinity(lambda_unit_grid, lambda_unit_len, "unit");
-    convert_lambda_infinity(lambda_nn_grid, lambda_nn_len, "nn");
+    convert_lambda_infinity(ctx.lambda_time_grid, lambda_time_len, "time");
+    convert_lambda_infinity(ctx.lambda_unit_grid, lambda_unit_len, "unit");
+    convert_lambda_infinity(ctx.lambda_nn_grid, lambda_nn_len, "nn");
     
     /* Read algorithm parameters */
     SF_scal_use("__trop_max_iter", &max_iter_d);
@@ -734,8 +807,8 @@ static ST_retcode handle_loocv_twostep(void) {
     }
     if (n_covariates > 0) {
         int n_obs = (int)n_periods * (int)n_units;
-        x_buf = (double *)malloc((size_t)n_obs * (size_t)n_covariates * sizeof(double));
-        if (!x_buf) {
+        ctx.x_buf = (double *)malloc((size_t)n_obs * (size_t)n_covariates * sizeof(double));
+        if (!ctx.x_buf) {
             TROP_LOG_ERROR("covariate memory allocation failed");
             rc = TROP_ERR_MEMORY;
             goto cleanup;
@@ -753,7 +826,7 @@ static ST_retcode handle_loocv_twostep(void) {
                         rc = 416;
                         goto cleanup;
                     }
-                    x_buf[row + col * n_obs] = val;
+                    ctx.x_buf[row + col * n_obs] = val;
                 }
             }
         }
@@ -761,25 +834,25 @@ static ST_retcode handle_loocv_twostep(void) {
 
     if (n_covariates > 0) {
         rust_rc = stata_loocv_grid_search_with_covariates(
-            y_matrix, d_matrix, control_mask, time_dist,
+            ctx.y_matrix, ctx.d_matrix, ctx.control_mask, ctx.time_dist,
             n_periods, n_units,
-            lambda_time_grid, lambda_time_len,
-            lambda_unit_grid, lambda_unit_len,
-            lambda_nn_grid, lambda_nn_len,
+            ctx.lambda_time_grid, lambda_time_len,
+            ctx.lambda_unit_grid, lambda_unit_len,
+            ctx.lambda_nn_grid, lambda_nn_len,
             max_iter, tol,
             &best_time, &best_unit, &best_nn, &best_score,
             &n_valid, &n_attempted,
             &first_failed_t, &first_failed_i,
             &stage1_time, &stage1_unit, &stage1_nn,
-            x_buf, n_covariates
+            ctx.x_buf, n_covariates
         );
     } else {
         rust_rc = stata_loocv_grid_search(
-            y_matrix, d_matrix, control_mask, time_dist,
+            ctx.y_matrix, ctx.d_matrix, ctx.control_mask, ctx.time_dist,
             n_periods, n_units,
-            lambda_time_grid, lambda_time_len,
-            lambda_unit_grid, lambda_unit_len,
-            lambda_nn_grid, lambda_nn_len,
+            ctx.lambda_time_grid, lambda_time_len,
+            ctx.lambda_unit_grid, lambda_unit_len,
+            ctx.lambda_nn_grid, lambda_nn_len,
             max_iter, tol,
             &best_time, &best_unit, &best_nn, &best_score,
             &n_valid, &n_attempted,
@@ -816,22 +889,17 @@ static ST_retcode handle_loocv_twostep(void) {
     /* Progress feedback: LOOCV twostep cycling complete */
     if (g_verbose_level >= TROP_VERBOSE_NORMAL) {
         char pbuf[256];
+        double fail_pct = (n_attempted > 0) ? 100.0 * (1.0 - (double)n_valid / (double)n_attempted) : 0.0;
         snprintf(pbuf, sizeof(pbuf),
-                 "{txt}  LOOCV (twostep) complete. Best score = %g\n", best_score);
+                 "{txt}  LOOCV (twostep) complete: evaluated %d/%d obs (fail rate %.1f%%), best score = %g\n",
+                 n_valid, n_attempted, fail_pct, best_score);
         SF_display(pbuf);
     }
     
     rc = TROP_SUCCESS;
     
 cleanup:
-    free(y_matrix);
-    free(d_matrix);
-    free(control_mask);
-    free(time_dist);
-    free(lambda_time_grid);
-    free(lambda_unit_grid);
-    free(lambda_nn_grid);
-    free(x_buf);
+    cleanup_alloc(&ctx);
     
     return rc;
 }
@@ -849,15 +917,8 @@ cleanup:
  * are agnostic to which strategy was used.
  */
 static ST_retcode handle_loocv_twostep_exhaustive(void) {
+    AllocContext ctx = {0};  /* P1.2: RAII context */
     ST_int n_units, n_periods;
-    double *y_matrix = NULL;
-    double *d_matrix = NULL;
-    unsigned char *control_mask = NULL;
-    int64_t *time_dist = NULL;
-    double *lambda_time_grid = NULL;
-    double *lambda_unit_grid = NULL;
-    double *lambda_nn_grid = NULL;
-    double *x_buf = NULL;
     int lambda_time_len, lambda_unit_len, lambda_nn_len;
     int n_covariates = 0;
     double max_iter_d, tol;
@@ -882,13 +943,13 @@ static ST_retcode handle_loocv_twostep_exhaustive(void) {
     rc = read_dimensions(&n_units, &n_periods);
     if (rc != TROP_SUCCESS) goto cleanup;
 
-    /* Allocate memory */
-    y_matrix = (double *)malloc(n_units * n_periods * sizeof(double));
-    d_matrix = (double *)malloc(n_units * n_periods * sizeof(double));
-    control_mask = (unsigned char *)malloc(n_units * n_periods);
-    time_dist = (int64_t *)malloc(n_periods * n_periods * sizeof(int64_t));
+    /* Allocate memory (via AllocContext) */
+    ctx.y_matrix = (double *)malloc(n_units * n_periods * sizeof(double));
+    ctx.d_matrix = (double *)malloc(n_units * n_periods * sizeof(double));
+    ctx.control_mask = (unsigned char *)malloc(n_units * n_periods);
+    ctx.time_dist = (int64_t *)malloc(n_periods * n_periods * sizeof(int64_t));
 
-    if (!y_matrix || !d_matrix || !control_mask || !time_dist) {
+    if (!ctx.y_matrix || !ctx.d_matrix || !ctx.control_mask || !ctx.time_dist) {
         TROP_LOG_ERROR("memory allocation failed");
         rc = TROP_ERR_MEMORY;
         goto cleanup;
@@ -900,30 +961,30 @@ static ST_retcode handle_loocv_twostep_exhaustive(void) {
     SF_scal_use("__trop_d_varindex", &d_idx_d);
     SF_scal_use("__trop_ctrl_varindex", &ctrl_idx_d);
 
-    rc = read_panel_pair_to_matrices((ST_int)y_idx_d, (ST_int)d_idx_d, n_periods, n_units, y_matrix, d_matrix);
+    rc = read_panel_pair_to_matrices((ST_int)y_idx_d, (ST_int)d_idx_d, n_periods, n_units, ctx.y_matrix, ctx.d_matrix);
     if (rc != TROP_SUCCESS) goto cleanup;
 
-    rc = read_control_mask((ST_int)ctrl_idx_d, n_periods, n_units, control_mask);
+    rc = read_control_mask((ST_int)ctrl_idx_d, n_periods, n_units, ctx.control_mask);
     if (rc != TROP_SUCCESS) goto cleanup;
 
     /* Read time distance matrix */
-    rc = read_time_dist_matrix("__trop_time_dist", n_periods, time_dist);
+    rc = read_time_dist_matrix("__trop_time_dist", n_periods, ctx.time_dist);
     if (rc != TROP_SUCCESS) goto cleanup;
 
     /* Read lambda grids */
-    rc = read_lambda_grid("__trop_lambda_time_grid", &lambda_time_grid, &lambda_time_len);
+    rc = read_lambda_grid("__trop_lambda_time_grid", &ctx.lambda_time_grid, &lambda_time_len);
     if (rc != TROP_SUCCESS) goto cleanup;
 
-    rc = read_lambda_grid("__trop_lambda_unit_grid", &lambda_unit_grid, &lambda_unit_len);
+    rc = read_lambda_grid("__trop_lambda_unit_grid", &ctx.lambda_unit_grid, &lambda_unit_len);
     if (rc != TROP_SUCCESS) goto cleanup;
 
-    rc = read_lambda_grid("__trop_lambda_nn_grid", &lambda_nn_grid, &lambda_nn_len);
+    rc = read_lambda_grid("__trop_lambda_nn_grid", &ctx.lambda_nn_grid, &lambda_nn_len);
     if (rc != TROP_SUCCESS) goto cleanup;
 
     /* Convert infinity sentinel values in grids */
-    convert_lambda_infinity(lambda_time_grid, lambda_time_len, "time");
-    convert_lambda_infinity(lambda_unit_grid, lambda_unit_len, "unit");
-    convert_lambda_infinity(lambda_nn_grid, lambda_nn_len, "nn");
+    convert_lambda_infinity(ctx.lambda_time_grid, lambda_time_len, "time");
+    convert_lambda_infinity(ctx.lambda_unit_grid, lambda_unit_len, "unit");
+    convert_lambda_infinity(ctx.lambda_nn_grid, lambda_nn_len, "nn");
 
     /* Read algorithm parameters */
     SF_scal_use("__trop_max_iter", &max_iter_d);
@@ -940,8 +1001,8 @@ static ST_retcode handle_loocv_twostep_exhaustive(void) {
     }
     if (n_covariates > 0) {
         int n_obs = (int)n_periods * (int)n_units;
-        x_buf = (double *)malloc((size_t)n_obs * (size_t)n_covariates * sizeof(double));
-        if (!x_buf) {
+        ctx.x_buf = (double *)malloc((size_t)n_obs * (size_t)n_covariates * sizeof(double));
+        if (!ctx.x_buf) {
             TROP_LOG_ERROR("covariate memory allocation failed");
             rc = TROP_ERR_MEMORY;
             goto cleanup;
@@ -959,7 +1020,7 @@ static ST_retcode handle_loocv_twostep_exhaustive(void) {
                         rc = 416;
                         goto cleanup;
                     }
-                    x_buf[row + col * n_obs] = val;
+                    ctx.x_buf[row + col * n_obs] = val;
                 }
             }
         }
@@ -968,24 +1029,24 @@ static ST_retcode handle_loocv_twostep_exhaustive(void) {
     /* Call Rust: exhaustive Cartesian search over the full grid. */
     if (n_covariates > 0) {
         rust_rc = stata_loocv_grid_search_exhaustive_with_covariates(
-            y_matrix, d_matrix, control_mask, time_dist,
+            ctx.y_matrix, ctx.d_matrix, ctx.control_mask, ctx.time_dist,
             n_periods, n_units,
-            lambda_time_grid, lambda_time_len,
-            lambda_unit_grid, lambda_unit_len,
-            lambda_nn_grid, lambda_nn_len,
+            ctx.lambda_time_grid, lambda_time_len,
+            ctx.lambda_unit_grid, lambda_unit_len,
+            ctx.lambda_nn_grid, lambda_nn_len,
             max_iter, tol,
             &best_time, &best_unit, &best_nn, &best_score,
             &n_valid, &n_attempted,
             &first_failed_t, &first_failed_i,
-            x_buf, n_covariates
+            ctx.x_buf, n_covariates
         );
     } else {
         rust_rc = stata_loocv_grid_search_exhaustive(
-            y_matrix, d_matrix, control_mask, time_dist,
+            ctx.y_matrix, ctx.d_matrix, ctx.control_mask, ctx.time_dist,
             n_periods, n_units,
-            lambda_time_grid, lambda_time_len,
-            lambda_unit_grid, lambda_unit_len,
-            lambda_nn_grid, lambda_nn_len,
+            ctx.lambda_time_grid, lambda_time_len,
+            ctx.lambda_unit_grid, lambda_unit_len,
+            ctx.lambda_nn_grid, lambda_nn_len,
             max_iter, tol,
             &best_time, &best_unit, &best_nn, &best_score,
             &n_valid, &n_attempted,
@@ -1012,17 +1073,21 @@ static ST_retcode handle_loocv_twostep_exhaustive(void) {
     TROP_LOG_INFO("LOOCV exhaustive complete: lambda_time=%g, lambda_unit=%g, lambda_nn=%g, score=%g, n_valid=%d, n_attempted=%d, first_failed=(%d,%d)",
                   best_time, best_unit, best_nn, best_score, n_valid, n_attempted, first_failed_t, first_failed_i);
 
+    /* Progress feedback: LOOCV twostep exhaustive complete */
+    if (g_verbose_level >= TROP_VERBOSE_NORMAL) {
+        char pbuf[256];
+        int n_grid = lambda_time_len * lambda_unit_len * lambda_nn_len;
+        double fail_pct = (n_attempted > 0) ? 100.0 * (1.0 - (double)n_valid / (double)n_attempted) : 0.0;
+        snprintf(pbuf, sizeof(pbuf),
+                 "{txt}  LOOCV (twostep, exhaustive) complete: %d grid points, %d/%d obs (fail rate %.1f%%), best score = %g\n",
+                 n_grid, n_valid, n_attempted, fail_pct, best_score);
+        SF_display(pbuf);
+    }
+
     rc = TROP_SUCCESS;
 
 cleanup:
-    free(y_matrix);
-    free(d_matrix);
-    free(control_mask);
-    free(time_dist);
-    free(lambda_time_grid);
-    free(lambda_unit_grid);
-    free(lambda_nn_grid);
-    free(x_buf);
+    cleanup_alloc(&ctx);
 
     return rc;
 }
@@ -1189,6 +1254,16 @@ static ST_retcode handle_loocv_joint(void) {
     TROP_LOG_INFO("LOOCV complete: lambda_time=%g, lambda_unit=%g, lambda_nn=%g, score=%g, n_valid=%d, n_attempted=%d, first_failed=(%d,%d), stage1=(%g,%g,%g)",
                   best_time, best_unit, best_nn, best_score, n_valid, n_attempted, first_failed_t, first_failed_i,
                   stage1_time, stage1_unit, stage1_nn);
+
+    /* Progress feedback: LOOCV joint cycling complete */
+    if (g_verbose_level >= TROP_VERBOSE_NORMAL) {
+        char pbuf[256];
+        double fail_pct = (n_attempted > 0) ? 100.0 * (1.0 - (double)n_valid / (double)n_attempted) : 0.0;
+        snprintf(pbuf, sizeof(pbuf),
+                 "{txt}  LOOCV (joint) complete: evaluated %d/%d obs (fail rate %.1f%%), best score = %g\n",
+                 n_valid, n_attempted, fail_pct, best_score);
+        SF_display(pbuf);
+    }
     
     rc = TROP_SUCCESS;
     
@@ -1360,6 +1435,17 @@ static ST_retcode handle_loocv_joint_exhaustive(void) {
     
     TROP_LOG_INFO("LOOCV (exhaustive) complete: lambda_time=%g, lambda_unit=%g, lambda_nn=%g, score=%g, n_valid=%d, n_attempted=%d, first_failed=(%d,%d)",
                   best_time, best_unit, best_nn, best_score, n_valid, n_attempted, first_failed_t, first_failed_i);
+
+    /* Progress feedback: LOOCV joint exhaustive complete */
+    if (g_verbose_level >= TROP_VERBOSE_NORMAL) {
+        char pbuf[256];
+        int n_grid = lambda_time_len * lambda_unit_len * lambda_nn_len;
+        double fail_pct = (n_attempted > 0) ? 100.0 * (1.0 - (double)n_valid / (double)n_attempted) : 0.0;
+        snprintf(pbuf, sizeof(pbuf),
+                 "{txt}  LOOCV (joint, exhaustive) complete: %d grid points, %d/%d obs (fail rate %.1f%%), best score = %g\n",
+                 n_grid, n_valid, n_attempted, fail_pct, best_score);
+        SF_display(pbuf);
+    }
     
     rc = TROP_SUCCESS;
     
@@ -1381,20 +1467,8 @@ cleanup:
  * ============================================================================ */
 
 static ST_retcode handle_estimate_twostep(void) {
+    AllocContext ctx = {0};  /* P1.2: RAII context */
     ST_int n_units, n_periods;
-    double *y_matrix = NULL;
-    double *d_matrix = NULL;
-    unsigned char *control_mask = NULL;
-    int64_t *time_dist = NULL;
-    double *tau = NULL;
-    double *alpha = NULL;
-    double *beta = NULL;
-    double *l_matrix = NULL;
-    int *converged_by_obs = NULL;
-    int *n_iters_by_obs = NULL;
-    double *unit_weights = NULL;
-    double *x_buf = NULL;
-    double *gamma_buf = NULL;
     int unit_weights_len = 0;
     int use_weights = 0;
     int n_covariates = 0;
@@ -1409,33 +1483,38 @@ static ST_retcode handle_estimate_twostep(void) {
     
     TROP_LOG_INFO("starting estimation (twostep)");
 
+    /* Clear stale condition-number scalars so a previous covariate run
+       cannot leak its value into a non-covariate run. */
+    SF_scal_save("__trop_condition_number", SV_missval);
+
     /* Progress feedback */
     if (g_verbose_level >= TROP_VERBOSE_NORMAL) {
         SF_display("{txt}  Estimation (twostep): fitting model...\n");
     }
     
+    
     /* Read dimensions */
     rc = read_dimensions(&n_units, &n_periods);
     if (rc != TROP_SUCCESS) goto cleanup;
     
-    /* Allocate input memory */
-    y_matrix = (double *)malloc(n_units * n_periods * sizeof(double));
-    d_matrix = (double *)malloc(n_units * n_periods * sizeof(double));
-    control_mask = (unsigned char *)malloc(n_units * n_periods);
-    time_dist = (int64_t *)malloc(n_periods * n_periods * sizeof(int64_t));
+    /* Allocate input memory (via AllocContext) */
+    ctx.y_matrix = (double *)malloc(n_units * n_periods * sizeof(double));
+    ctx.d_matrix = (double *)malloc(n_units * n_periods * sizeof(double));
+    ctx.control_mask = (unsigned char *)malloc(n_units * n_periods);
+    ctx.time_dist = (int64_t *)malloc(n_periods * n_periods * sizeof(int64_t));
     
     /* Allocate output memory (max possible sizes) */
-    tau = (double *)malloc(n_units * n_periods * sizeof(double));  /* Max treated */
-    alpha = (double *)malloc(n_units * sizeof(double));
-    beta = (double *)malloc(n_periods * sizeof(double));
-    l_matrix = (double *)malloc(n_units * n_periods * sizeof(double));
+    ctx.tau = (double *)malloc(n_units * n_periods * sizeof(double));  /* Max treated */
+    ctx.alpha = (double *)malloc(n_units * sizeof(double));
+    ctx.beta = (double *)malloc(n_periods * sizeof(double));
+    ctx.l_matrix = (double *)malloc(n_units * n_periods * sizeof(double));
     /* Per-obs diagnostics: sized at the N*T upper bound on treated cells. */
-    converged_by_obs = (int *)malloc((size_t)n_units * (size_t)n_periods * sizeof(int));
-    n_iters_by_obs   = (int *)malloc((size_t)n_units * (size_t)n_periods * sizeof(int));
+    ctx.converged_by_obs = (int *)malloc((size_t)n_units * (size_t)n_periods * sizeof(int));
+    ctx.n_iters_by_obs   = (int *)malloc((size_t)n_units * (size_t)n_periods * sizeof(int));
     
-    if (!y_matrix || !d_matrix || !control_mask || !time_dist ||
-        !tau || !alpha || !beta || !l_matrix ||
-        !converged_by_obs || !n_iters_by_obs) {
+    if (!ctx.y_matrix || !ctx.d_matrix || !ctx.control_mask || !ctx.time_dist ||
+        !ctx.tau || !ctx.alpha || !ctx.beta || !ctx.l_matrix ||
+        !ctx.converged_by_obs || !ctx.n_iters_by_obs) {
         TROP_LOG_ERROR("memory allocation failed");
         rc = TROP_ERR_MEMORY;
         goto cleanup;
@@ -1447,13 +1526,13 @@ static ST_retcode handle_estimate_twostep(void) {
     SF_scal_use("__trop_d_varindex", &d_idx_d);
     SF_scal_use("__trop_ctrl_varindex", &ctrl_idx_d);
     
-    rc = read_panel_pair_to_matrices((ST_int)y_idx_d, (ST_int)d_idx_d, n_periods, n_units, y_matrix, d_matrix);
+    rc = read_panel_pair_to_matrices((ST_int)y_idx_d, (ST_int)d_idx_d, n_periods, n_units, ctx.y_matrix, ctx.d_matrix);
     if (rc != TROP_SUCCESS) goto cleanup;
     
-    rc = read_control_mask((ST_int)ctrl_idx_d, n_periods, n_units, control_mask);
+    rc = read_control_mask((ST_int)ctrl_idx_d, n_periods, n_units, ctx.control_mask);
     if (rc != TROP_SUCCESS) goto cleanup;
     
-    rc = read_time_dist_matrix("__trop_time_dist", n_periods, time_dist);
+    rc = read_time_dist_matrix("__trop_time_dist", n_periods, ctx.time_dist);
     if (rc != TROP_SUCCESS) goto cleanup;
     
     /* Read lambda parameters */
@@ -1475,7 +1554,7 @@ static ST_retcode handle_estimate_twostep(void) {
         use_weights = ((int)use_weights_d != 0) ? 1 : 0;
     }
     if (use_weights) {
-        rc = read_lambda_grid("__trop_unit_weights", &unit_weights, &unit_weights_len);
+        rc = read_lambda_grid("__trop_unit_weights", &ctx.unit_weights, &unit_weights_len);
         if (rc != TROP_SUCCESS) goto cleanup;
         if (unit_weights_len != (int)n_units) {
             TROP_LOG_ERROR("unit_weights length %d != n_units %d",
@@ -1494,9 +1573,9 @@ static ST_retcode handle_estimate_twostep(void) {
     }
     if (n_covariates > 0) {
         int n_obs = (int)n_periods * (int)n_units;
-        x_buf = (double *)malloc((size_t)n_obs * (size_t)n_covariates * sizeof(double));
-        gamma_buf = (double *)calloc((size_t)n_covariates, sizeof(double));
-        if (!x_buf || !gamma_buf) {
+        ctx.x_buf = (double *)malloc((size_t)n_obs * (size_t)n_covariates * sizeof(double));
+        ctx.gamma_buf = (double *)calloc((size_t)n_covariates, sizeof(double));
+        if (!ctx.x_buf || !ctx.gamma_buf) {
             TROP_LOG_ERROR("covariate memory allocation failed");
             rc = TROP_ERR_MEMORY;
             goto cleanup;
@@ -1514,7 +1593,7 @@ static ST_retcode handle_estimate_twostep(void) {
                         rc = 416;
                         goto cleanup;
                     }
-                    x_buf[row + col * n_obs] = val;
+                    ctx.x_buf[row + col * n_obs] = val;
                 }
             }
         }
@@ -1523,35 +1602,35 @@ static ST_retcode handle_estimate_twostep(void) {
     /* Call Rust function (weighted, covariate, or plain) */
     if (use_weights) {
         rust_rc = stata_estimate_twostep_weighted(
-            y_matrix, d_matrix, control_mask, time_dist,
+            ctx.y_matrix, ctx.d_matrix, ctx.control_mask, ctx.time_dist,
             n_periods, n_units,
             lambda_time, lambda_unit, lambda_nn,
             max_iter, tol,
-            &att, tau, alpha, beta, l_matrix,
+            &att, ctx.tau, ctx.alpha, ctx.beta, ctx.l_matrix,
             &n_treated, &n_iterations, &converged,
-            converged_by_obs, n_iters_by_obs,
-            unit_weights
+            ctx.converged_by_obs, ctx.n_iters_by_obs,
+            ctx.unit_weights
         );
     } else if (n_covariates > 0) {
         rust_rc = stata_estimate_twostep_with_covariates(
-            y_matrix, d_matrix, control_mask, time_dist,
+            ctx.y_matrix, ctx.d_matrix, ctx.control_mask, ctx.time_dist,
             n_periods, n_units,
             lambda_time, lambda_unit, lambda_nn,
             max_iter, tol,
-            &att, tau, alpha, beta, l_matrix,
+            &att, ctx.tau, ctx.alpha, ctx.beta, ctx.l_matrix,
             &n_treated, &n_iterations, &converged,
-            converged_by_obs, n_iters_by_obs,
-            x_buf, n_covariates, gamma_buf
+            ctx.converged_by_obs, ctx.n_iters_by_obs,
+            ctx.x_buf, n_covariates, ctx.gamma_buf
         );
     } else {
         rust_rc = stata_estimate_twostep(
-            y_matrix, d_matrix, control_mask, time_dist,
+            ctx.y_matrix, ctx.d_matrix, ctx.control_mask, ctx.time_dist,
             n_periods, n_units,
             lambda_time, lambda_unit, lambda_nn,
             max_iter, tol,
-            &att, tau, alpha, beta, l_matrix,
+            &att, ctx.tau, ctx.alpha, ctx.beta, ctx.l_matrix,
             &n_treated, &n_iterations, &converged,
-            converged_by_obs, n_iters_by_obs
+            ctx.converged_by_obs, ctx.n_iters_by_obs
         );
     }
     
@@ -1574,10 +1653,10 @@ static ST_retcode handle_estimate_twostep(void) {
         double *tmp = (double *)malloc((size_t)n_treated * sizeof(double));
         if (tmp != NULL) {
             int k;
-            for (k = 0; k < n_treated; k++) tmp[k] = (double)converged_by_obs[k];
+            for (k = 0; k < n_treated; k++) tmp[k] = (double)ctx.converged_by_obs[k];
             rc = write_vector_to_matrix("__trop_converged_by_obs", tmp, n_treated, 0);
             if (rc == TROP_SUCCESS) {
-                for (k = 0; k < n_treated; k++) tmp[k] = (double)n_iters_by_obs[k];
+                for (k = 0; k < n_treated; k++) tmp[k] = (double)ctx.n_iters_by_obs[k];
                 rc = write_vector_to_matrix("__trop_n_iters_by_obs", tmp, n_treated, 0);
             }
             free(tmp);
@@ -1595,7 +1674,7 @@ static ST_retcode handle_estimate_twostep(void) {
         for (ii = 0; ii < n_units; ii++) {
             int unit_treated = 0;
             for (tt = 0; tt < n_periods; tt++) {
-                if (d_matrix[ii * n_periods + tt] == 1.0) {
+                if (ctx.d_matrix[ii * n_periods + tt] == 1.0) {
                     n_treated_total++;
                     unit_treated = 1;
                 }
@@ -1611,33 +1690,33 @@ static ST_retcode handle_estimate_twostep(void) {
     }
     
     /* Write tau vector to matrix */
-    rc = write_vector_to_matrix("__trop_tau", tau, n_treated, 0);
+    rc = write_vector_to_matrix("__trop_tau", ctx.tau, n_treated, 0);
     if (rc != TROP_SUCCESS) goto cleanup;
     
     /* Write alpha (unit fixed effects) */
-    rc = write_vector_to_matrix("__trop_alpha", alpha, n_units, 0);
+    rc = write_vector_to_matrix("__trop_alpha", ctx.alpha, n_units, 0);
     if (rc != TROP_SUCCESS) goto cleanup;
     
     /* Write beta (time fixed effects) */
-    rc = write_vector_to_matrix("__trop_beta", beta, n_periods, 0);
+    rc = write_vector_to_matrix("__trop_beta", ctx.beta, n_periods, 0);
     if (rc != TROP_SUCCESS) goto cleanup;
     
     /* Write L matrix (low-rank factor matrix) */
-    rc = write_matrix_to_stata("__trop_factor_matrix", l_matrix, n_periods, n_units);
+    rc = write_matrix_to_stata("__trop_factor_matrix", ctx.l_matrix, n_periods, n_units);
     if (rc != TROP_SUCCESS) goto cleanup;
 
     /* Write gamma (covariate coefficients) if estimated.
        __trop_gamma is pre-allocated as 1 x p (row vector, Stata convention).
        Store into row=1, col=j+1. */
-    if (n_covariates > 0 && gamma_buf != NULL) {
+    if (n_covariates > 0 && ctx.gamma_buf != NULL) {
         int j;
         for (j = 0; j < n_covariates; j++) {
-            SF_mat_store("__trop_gamma", 1, j + 1, gamma_buf[j]);
+            SF_mat_store("__trop_gamma", 1, j + 1, ctx.gamma_buf[j]);
         }
-        /* Store the condition number from the last covariate SVD solve.
-         * Only meaningful when covariates are present (otherwise NaN). */
+        /* Store the condition number from the covariate WLS solve.
+         * LAST_COVARIATE_RCOND is set on both Cholesky and SVD paths. */
         {
-            double cond_num = stata_get_last_condition_number();
+            double cond_num = stata_get_last_covariate_rcond();
             if (!isnan(cond_num) && cond_num > 0.0) {
                 SF_scal_save("__trop_condition_number", cond_num);
             }
@@ -1660,7 +1739,7 @@ static ST_retcode handle_estimate_twostep(void) {
         /* Find first treated observation from D matrix */
         for (t_idx = 0; t_idx < n_periods && first_target_unit < 0; t_idx++) {
             for (i_idx = 0; i_idx < n_units; i_idx++) {
-                if (d_matrix[i_idx * n_periods + t_idx] == 1.0) {
+                if (ctx.d_matrix[i_idx * n_periods + t_idx] == 1.0) {
                     first_target_unit = (int)i_idx;
                     first_target_period = (int)t_idx;
                     break;
@@ -1674,7 +1753,7 @@ static ST_retcode handle_estimate_twostep(void) {
             
             if (theta_vec && omega_vec) {
                 rust_rc = stata_compute_twostep_weight_vectors(
-                    y_matrix, d_matrix, time_dist,
+                    ctx.y_matrix, ctx.d_matrix, ctx.time_dist,
                     n_periods, n_units,
                     first_target_unit, first_target_period,
                     lambda_time, lambda_unit,
@@ -1703,19 +1782,7 @@ static ST_retcode handle_estimate_twostep(void) {
     rc = TROP_SUCCESS;
     
 cleanup:
-    free(y_matrix);
-    free(d_matrix);
-    free(control_mask);
-    free(time_dist);
-    free(tau);
-    free(alpha);
-    free(beta);
-    free(l_matrix);
-    free(converged_by_obs);
-    free(n_iters_by_obs);
-    free(unit_weights);
-    free(x_buf);
-    free(gamma_buf);
+    cleanup_alloc(&ctx);
     
     return rc;
 }
@@ -1749,6 +1816,10 @@ static ST_retcode handle_estimate_joint(void) {
     int rust_rc;
     
     TROP_LOG_INFO("starting estimation (joint)");
+
+    /* Clear stale condition-number scalars so a previous covariate run
+       cannot leak its value into a non-covariate run. */
+    SF_scal_save("__trop_condition_number", SV_missval);
 
     /* Progress feedback */
     if (g_verbose_level >= TROP_VERBOSE_NORMAL) {
@@ -1945,9 +2016,9 @@ static ST_retcode handle_estimate_joint(void) {
         for (j = 0; j < n_covariates; j++) {
             SF_mat_store("__trop_gamma", 1, j + 1, gamma_buf[j]);
         }
-        /* Store the condition number from the last covariate SVD solve. */
+        /* Store the condition number from the covariate WLS solve. */
         {
-            double cond_num = stata_get_last_condition_number();
+            double cond_num = stata_get_last_covariate_rcond();
             if (!isnan(cond_num) && cond_num > 0.0) {
                 SF_scal_save("__trop_condition_number", cond_num);
             }
@@ -2221,6 +2292,15 @@ static ST_retcode handle_bootstrap_twostep(void) {
     
     TROP_LOG_INFO("bootstrap complete: SE=%g, n_valid=%d/%d",
                   se, n_valid, n_bootstrap);
+
+    /* Progress feedback: bootstrap twostep complete */
+    if (g_verbose_level >= TROP_VERBOSE_NORMAL) {
+        char pbuf[256];
+        snprintf(pbuf, sizeof(pbuf),
+                 "{txt}  Bootstrap (twostep) complete: %d/%d replications, SE = %.6f\n",
+                 n_valid, n_bootstrap, se);
+        SF_display(pbuf);
+    }
     
     rc = TROP_SUCCESS;
     
@@ -2436,6 +2516,15 @@ static ST_retcode handle_bootstrap_joint(void) {
     
     TROP_LOG_INFO("bootstrap complete: SE=%g, n_valid=%d/%d",
                   se, n_valid, n_bootstrap);
+
+    /* Progress feedback: bootstrap joint complete */
+    if (g_verbose_level >= TROP_VERBOSE_NORMAL) {
+        char pbuf[256];
+        snprintf(pbuf, sizeof(pbuf),
+                 "{txt}  Bootstrap (joint) complete: %d/%d replications, SE = %.6f\n",
+                 n_valid, n_bootstrap, se);
+        SF_display(pbuf);
+    }
     
     rc = TROP_SUCCESS;
     
@@ -2640,6 +2729,15 @@ static ST_retcode handle_bootstrap_rao_wu_twostep(void) {
     
     TROP_LOG_INFO("Rao-Wu bootstrap (twostep) complete: SE=%g, n_valid=%d/%d",
                   se, n_valid, n_bootstrap);
+
+    /* Progress feedback: Rao-Wu bootstrap twostep complete */
+    if (g_verbose_level >= TROP_VERBOSE_NORMAL) {
+        char pbuf[256];
+        snprintf(pbuf, sizeof(pbuf),
+                 "{txt}  Bootstrap (Rao-Wu, twostep) complete: %d/%d replications, SE = %.6f\n",
+                 n_valid, n_bootstrap, se);
+        SF_display(pbuf);
+    }
     
     /* Compute survey diagnostics (DEFF + high-FPC detection) */
     {
@@ -2853,6 +2951,15 @@ static ST_retcode handle_bootstrap_rao_wu_joint(void) {
     
     TROP_LOG_INFO("Rao-Wu bootstrap (joint) complete: SE=%g, n_valid=%d/%d",
                   se, n_valid, n_bootstrap);
+
+    /* Progress feedback: Rao-Wu bootstrap joint complete */
+    if (g_verbose_level >= TROP_VERBOSE_NORMAL) {
+        char pbuf[256];
+        snprintf(pbuf, sizeof(pbuf),
+                 "{txt}  Bootstrap (Rao-Wu, joint) complete: %d/%d replications, SE = %.6f\n",
+                 n_valid, n_bootstrap, se);
+        SF_display(pbuf);
+    }
     
     /* Compute survey diagnostics (DEFF + high-FPC detection) */
     {
@@ -2953,7 +3060,8 @@ cleanup:
 /* ============================================================================
  * Initialize Verbose Level
  *
- * Reads __trop_verbose scalar from Stata and clamps to [0, 4]:
+ * Reads __trop_verbose_level scalar from Stata (preferred) or falls back to
+ * __trop_verbose, then clamps to [0, 4]:
  *   0 = QUIET    (errors only)
  *   1 = NORMAL   (progress milestones; default)
  *   2 = DETAILED (per-stage summaries)
@@ -2965,7 +3073,12 @@ static void init_verbose_level(void) {
     double verbose_d;
     ST_retcode rc;
     
-    rc = SF_scal_use("__trop_verbose", &verbose_d);
+    /* Prefer the new scalar name (__trop_verbose_level) set by trop.ado */
+    rc = SF_scal_use("__trop_verbose_level", &verbose_d);
+    if (rc != 0) {
+        /* Fallback to legacy scalar name for backward compatibility */
+        rc = SF_scal_use("__trop_verbose", &verbose_d);
+    }
     if (rc == 0) {
         int level = (int)verbose_d;
         if (level < TROP_VERBOSE_QUIET) level = TROP_VERBOSE_QUIET;
@@ -2973,6 +3086,29 @@ static void init_verbose_level(void) {
         g_verbose_level = level;
     } else {
         g_verbose_level = TROP_VERBOSE_NORMAL;
+    }
+}
+
+/* ============================================================================
+ * ABI Version Verification (P3.3)
+ *
+ * Checks that the loaded core library matches the expected ABI version.
+ * Emits a warning on mismatch but does not block execution.
+ * ============================================================================ */
+
+static int g_abi_verified = 0;
+
+static void verify_abi_version(void) {
+    if (!g_abi_verified) {
+        int v = trop_abi_version();
+        if (v != TROP_EXPECTED_ABI_VERSION) {
+            char buf[128];
+            snprintf(buf, sizeof(buf),
+                     "{err}Warning: TROP plugin ABI version mismatch "
+                     "(got %d, expected %d)\n", v, TROP_EXPECTED_ABI_VERSION);
+            SF_display(buf);
+        }
+        g_abi_verified = 1;
     }
 }
 
@@ -2986,6 +3122,9 @@ STDLL stata_call(int argc, char *argv[]) {
     
     /* Initialize verbose level */
     init_verbose_level();
+    
+    /* Verify ABI version on first call */
+    verify_abi_version();
     
     /* Check for command argument */
     if (argc < 1 || argv[0] == NULL) {

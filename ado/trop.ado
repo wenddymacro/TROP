@@ -146,9 +146,9 @@ program define trop, eclass
     if "`grid_style'" == "" {
         local grid_style "default"
     }
-    // grid_style别名映射 (入口处即转换为内部值)
-    //   standard   → default   (论文Footnote 2第一阶段粗搜索, 180组合)
-    //   exhaustive → extended  (论文Table 2所有最优值穷举覆盖)
+    // grid_style alias mapping (normalize at entry point)
+    //   standard   -> default   (paper Footnote 2 Stage-1 coarse search, 180 combos)
+    //   exhaustive -> extended  (paper Table 2 full optimal-value coverage)
     if "`grid_style'" == "standard" {
         local grid_style "default"
     }
@@ -797,6 +797,9 @@ program define trop, eclass
         local _verbose_level = 2
     }
     local verbose_flag = `_verbose_level'
+    // Write verbose level to Stata scalar for plugin consumption.
+    // The C bridge reads __trop_verbose_level at each plugin call entry.
+    scalar __trop_verbose_level = `_verbose_level'
     // Ensure backward-compat: existing `if "`verbose'" != ""` guards fire
     // whenever the resolved level is >= 2 (DETAILED).
     if `_verbose_level' >= 2 & "`verbose'" == "" {
@@ -1402,7 +1405,7 @@ program define trop, eclass
     if "`method'" == "twostep" {
         di as txt _n "{it:Note: e(alpha)/e(beta)/e(factor_matrix) are averages across}"
         di as txt "{it:      treated observations (each treated cell fits its own model).}"
-        di as txt "{it:      Per-observation estimates are not stored; see e(alpha_semantics)=""obs_average"".}"
+        di as txt `"{it:      Per-observation estimates are not stored; see e(alpha_semantics)="obs_average".}"'
     }
 
     // Bootstrap summary

@@ -57,6 +57,18 @@ thread_local! {
     pub static LAST_CONDITION_NUMBER: Cell<f64> = const { Cell::new(f64::NAN) };
 }
 
+/// Thread-local storage for the last computed covariate WLS inverse condition number.
+///
+/// Set to `f64::NAN` at the start of each estimation call.
+/// Only populated with a meaningful value when the SVD fallback path is triggered
+/// (i.e., when X'WX is not positive definite and Cholesky fails).
+///
+/// Read externally via `stata_get_last_covariate_rcond()` FFI function.
+/// Distinct from `LAST_CONDITION_NUMBER` which tracks the main model's SVD condition.
+thread_local! {
+    pub static LAST_COVARIATE_RCOND: Cell<f64> = const { Cell::new(f64::NAN) };
+}
+
 /// Pure-Rust least squares solver using faer SVD (used on Windows where external
 /// LAPACK is not available during cross-compilation).
 ///
@@ -443,10 +455,11 @@ fn estimate_model_impl(
         return None;
     }
 
-    // Reset condition number before covariate estimation to avoid cross-call leakage.
-    if x.is_some() {
-        LAST_CONDITION_NUMBER.with(|c| c.set(f64::NAN));
-    }
+    // Reset condition number unconditionally to avoid cross-call leakage.
+    // Even when x is None (no covariates), we must clear stale values from
+    // a prior covariate-bearing call so FFI never reads a leftover number.
+    LAST_CONDITION_NUMBER.with(|c| c.set(f64::NAN));
+    LAST_COVARIATE_RCOND.with(|c| c.set(f64::NAN));
 
     // Create estimation mask
     let mut est_mask =
@@ -529,13 +542,24 @@ fn estimate_model_impl(
     let mut actual_iters: usize = 0;
     let mut converged = false;
 
+    // Pre-allocate convergence-check buffers (P1.4: avoid per-iteration allocation).
+    let mut alpha_old = Array1::<f64>::zeros(n_units);
+    let mut beta_old = Array1::<f64>::zeros(n_periods);
+    let mut l_old = Array2::<f64>::zeros((n_periods, n_units));
+    let mut gamma_old = Array1::<f64>::zeros(n_cov);
+
+    // Pre-allocate FISTA inner-loop buffers (reused across outer iterations).
+    let mut gradient_step_buf = Array2::<f64>::zeros((n_periods, n_units));
+    let mut l_momentum_buf = Array2::<f64>::zeros((n_periods, n_units));
+    let mut l_inner_old_buf = Array2::<f64>::zeros((n_periods, n_units));
+
     // Alternating minimization
     for _ in 0..max_iter {
         actual_iters += 1;
-        let alpha_old = (*alpha).clone();
-        let beta_old = (*beta).clone();
-        let l_old = (*l).clone();
-        let gamma_old = (*gamma).clone();
+        alpha_old.assign(&*alpha);
+        beta_old.assign(&*beta);
+        l_old.assign(&*l);
+        gamma_old.assign(&*gamma);
 
         // Step 1: Update α and β (weighted least squares).
         // R = Y - L - X'γ (when covariates present)
@@ -608,8 +632,20 @@ fn estimate_model_impl(
             // Solve XtWX * gamma = XtWy using Cholesky or fallback to lstsq
             if let Some(gamma_new) = solve_symmetric_positive(&xtwx, &xtwy) {
                 gamma.assign(&gamma_new);
+                // P1.6 fix: The diagonal approximation cond ≈ (max√diag / min√diag)²
+                // is only a lower bound and can be falsely low for non-diagonally-dominant
+                // matrices.  Since Cholesky does not provide singular values, we leave
+                // the condition number as NaN ("not computed").  Truly ill-conditioned
+                // systems will fail Cholesky and fall through to the SVD path which
+                // reports an accurate condition number.
+                LAST_COVARIATE_RCOND.with(|c| c.set(f64::NAN));
             } else if let Some(gamma_new) = solve_lstsq_small(&xtwx, &xtwy) {
                 gamma.assign(&gamma_new);
+                // P1.6: solve_lstsq_small already set LAST_CONDITION_NUMBER;
+                // mirror it into the covariate-specific thread-local.
+                LAST_COVARIATE_RCOND.with(|c| {
+                    c.set(LAST_CONDITION_NUMBER.with(|cn| cn.get()));
+                });
             }
             // else: keep previous gamma (graceful degradation)
         }
@@ -715,24 +751,31 @@ fn estimate_model_impl(
             };
 
             for _ in 0..inner_cap {
-                let l_inner_old = (*l).clone();
+                // P1.4: reuse pre-allocated buffer instead of clone.
+                l_inner_old_buf.assign(&*l);
 
-                // Nesterov momentum extrapolation.
+                // Nesterov momentum extrapolation (in-place into pre-allocated buffer).
                 let t_fista_new = (1.0 + (1.0 + 4.0 * t_fista * t_fista).sqrt()) / 2.0;
                 let momentum = (t_fista - 1.0) / t_fista_new;
-                let l_momentum = Array2::from_shape_fn((n_periods, n_units), |(t, i)| {
-                    l[[t, i]] + momentum * (l[[t, i]] - l_prev[[t, i]])
-                });
+                for t in 0..n_periods {
+                    for i in 0..n_units {
+                        l_momentum_buf[[t, i]] =
+                            l[[t, i]] + momentum * (l[[t, i]] - l_prev[[t, i]]);
+                    }
+                }
 
-                // Gradient step from the momentum point.
-                let gradient_step = Array2::from_shape_fn((n_periods, n_units), |(t, i)| {
-                    l_momentum[[t, i]]
-                        + w_norm[[t, i]] * (r_masked[[t, i]] - l_momentum[[t, i]])
-                });
+                // Gradient step from the momentum point (in-place into pre-allocated buffer).
+                for t in 0..n_periods {
+                    for i in 0..n_units {
+                        gradient_step_buf[[t, i]] = l_momentum_buf[[t, i]]
+                            + w_norm[[t, i]]
+                                * (r_masked[[t, i]] - l_momentum_buf[[t, i]]);
+                    }
+                }
 
                 // Proximal step: soft-threshold singular values.
-                l_prev = (*l).clone();
-                *l = soft_threshold_svd(&gradient_step, prox_threshold)?;
+                // P1.4: swap l_prev with l_inner_old_buf after checks (avoids clone).
+                *l = soft_threshold_svd(&gradient_step_buf, prox_threshold)?;
                 t_fista = t_fista_new;
 
                 // Gradient-based adaptive restart (O'Donoghue & Candes 2015,
@@ -752,8 +795,8 @@ fn estimate_model_impl(
                 let mut restart_inner = 0.0_f64;
                 for t in 0..n_periods {
                     for i in 0..n_units {
-                        restart_inner += (l_momentum[[t, i]] - l[[t, i]])
-                            * (l[[t, i]] - l_inner_old[[t, i]]);
+                        restart_inner += (l_momentum_buf[[t, i]] - l[[t, i]])
+                            * (l[[t, i]] - l_inner_old_buf[[t, i]]);
                     }
                 }
                 if restart_inner > 0.0 {
@@ -761,9 +804,13 @@ fn estimate_model_impl(
                 }
 
                 // Check inner convergence against the previous iterate.
-                if max_abs_diff_2d(&*l, &l_inner_old) < tol {
+                if max_abs_diff_2d(&*l, &l_inner_old_buf) < tol {
                     break;
                 }
+
+                // P1.4: rotate l_prev ← l_inner_old_buf via swap (zero-alloc).
+                // l_inner_old_buf holds L_k; next iteration needs l_prev = L_k.
+                std::mem::swap(&mut l_prev, &mut l_inner_old_buf);
             }
         }
 

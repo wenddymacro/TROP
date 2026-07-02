@@ -25,10 +25,21 @@
 //! `better_candidate`, which combines the primary score comparison with a
 //! deterministic tie-breaker (see the function documentation for details).
 
+use std::collections::HashMap;
+use std::sync::Mutex;
+
 use ndarray::{Array1, Array2, ArrayView2};
 use rayon::prelude::*;
 
 use crate::distance::UnitDistanceCache;
+
+/// Key type for the cycling score cache: f64 triple encoded as bit patterns.
+/// Using `to_bits()` ensures exact-match semantics (no floating-point comparison issues).
+type CyclingCacheKey = (u64, u64, u64);
+
+/// Thread-safe cache for LOOCV scores evaluated during coordinate descent cycling.
+/// Maps (λ_time_bits, λ_unit_bits, λ_nn_bits) → (score, n_valid, first_failed).
+type CyclingScoreCache = Mutex<HashMap<CyclingCacheKey, (f64, usize, Option<(usize, usize)>)>>;
 use crate::error::{TropError, TropResult};
 use crate::estimation::{
     debug_assert_delta_is_1minus_d_masked, estimate_model, solve_joint_no_lowrank,
@@ -624,6 +635,105 @@ pub fn univariate_loocv_search(
     (best_value, best_score)
 }
 
+/// Cache-aware univariate LOOCV search for the twostep cycling path.
+///
+/// Identical to [`univariate_loocv_search`] but checks `score_cache` before
+/// evaluating `loocv_score_for_params`.  Complete evaluations (n_valid ==
+/// control_obs.len()) are stored in the cache; early-terminated results are
+/// NOT cached to preserve correctness (they depend on the `best_score`
+/// bound which varies across cycles).
+#[allow(clippy::too_many_arguments)]
+fn univariate_loocv_search_cached(
+    y: &ArrayView2<f64>,
+    d: &ArrayView2<f64>,
+    control_mask: &ArrayView2<u8>,
+    time_dist: &ArrayView2<i64>,
+    dist_cache: &UnitDistanceCache,
+    control_obs: &[(usize, usize)],
+    grid: &[f64],
+    fixed_time: f64,
+    fixed_unit: f64,
+    fixed_nn: f64,
+    param_type: usize,
+    max_iter: usize,
+    tol: f64,
+    x: Option<&ArrayView2<f64>>,
+    score_cache: &CyclingScoreCache,
+) -> (f64, f64) {
+    let mut best_score = f64::INFINITY;
+    let mut best_value = grid.first().copied().unwrap_or(0.0);
+
+    let fixed_time_eff = if fixed_time.is_infinite() { 0.0 } else { fixed_time };
+    let fixed_unit_eff = if fixed_unit.is_infinite() { 0.0 } else { fixed_unit };
+    let fixed_nn_eff = if fixed_nn.is_infinite() { 1e10 } else { fixed_nn };
+
+    let n_control = control_obs.len();
+
+    let results: Vec<(f64, f64, f64, f64, f64)> = grid
+        .par_iter()
+        .map(|&value| {
+            let (lambda_time, lambda_unit, lambda_nn) = match param_type {
+                0 => (value, fixed_unit_eff, fixed_nn_eff),
+                1 => (fixed_time_eff, value, fixed_nn_eff),
+                _ => (fixed_time_eff, fixed_unit_eff, value),
+            };
+
+            let cache_key = (
+                lambda_time.to_bits(),
+                lambda_unit.to_bits(),
+                lambda_nn.to_bits(),
+            );
+
+            // Check cache first
+            if let Ok(cache) = score_cache.lock() {
+                if let Some(&(cached_score, _, _)) = cache.get(&cache_key) {
+                    return (value, lambda_time, lambda_unit, lambda_nn, cached_score);
+                }
+            }
+
+            let (score, n_valid, first_failed) = loocv_score_for_params(
+                y,
+                d,
+                control_mask,
+                time_dist,
+                dist_cache,
+                control_obs,
+                lambda_time,
+                lambda_unit,
+                lambda_nn,
+                max_iter,
+                tol,
+                best_score,
+                x,
+            );
+
+            // Cache only complete evaluations (not early-terminated)
+            if n_valid == n_control || score == f64::INFINITY {
+                if let Ok(mut cache) = score_cache.lock() {
+                    cache.insert(cache_key, (score, n_valid, first_failed));
+                }
+            }
+
+            (value, lambda_time, lambda_unit, lambda_nn, score)
+        })
+        .collect();
+
+    let mut best_lt = fixed_time_eff;
+    let mut best_lu = fixed_unit_eff;
+    let mut best_ln = fixed_nn_eff;
+    for (value, lt, lu, ln, score) in results {
+        if better_candidate((lt, lu, ln, score), (best_lt, best_lu, best_ln, best_score)) {
+            best_score = score;
+            best_value = value;
+            best_lt = lt;
+            best_lu = lu;
+            best_ln = ln;
+        }
+    }
+
+    (best_value, best_score)
+}
+
 /// Coordinate descent cycling over (λ_unit, λ_time, λ_nn) for the twostep
 /// method.
 ///
@@ -631,6 +741,9 @@ pub fn univariate_loocv_search(
 /// parameter while holding the other two at their most recent optimal values.
 /// Cycling order: λ_unit → λ_time → λ_nn.
 /// Terminates when |Q_new − Q_old| < 1e-6 or `max_cycles` is reached.
+///
+/// Uses a score cache to avoid re-evaluating λ triples that were already
+/// computed in previous cycles (P2.1 optimisation).
 #[allow(clippy::too_many_arguments)]
 pub fn cycling_parameter_search(
     y: &ArrayView2<f64>,
@@ -655,9 +768,12 @@ pub fn cycling_parameter_search(
     let mut lambda_nn = initial_nn;
     let mut prev_score = f64::INFINITY;
 
+    // P2.1: Score cache shared across all cycles to avoid redundant evaluations.
+    let score_cache: CyclingScoreCache = Mutex::new(HashMap::new());
+
     for _cycle in 0..max_cycles {
         // Optimize λ_unit (fix λ_time, λ_nn)
-        let (new_unit, _) = univariate_loocv_search(
+        let (new_unit, _) = univariate_loocv_search_cached(
             y,
             d,
             control_mask,
@@ -672,11 +788,12 @@ pub fn cycling_parameter_search(
             max_iter,
             tol,
             x,
+            &score_cache,
         );
         lambda_unit = new_unit;
 
         // Optimize λ_time (fix λ_unit, λ_nn)
-        let (new_time, _) = univariate_loocv_search(
+        let (new_time, _) = univariate_loocv_search_cached(
             y,
             d,
             control_mask,
@@ -691,11 +808,12 @@ pub fn cycling_parameter_search(
             max_iter,
             tol,
             x,
+            &score_cache,
         );
         lambda_time = new_time;
 
         // Optimize λ_nn (fix λ_unit, λ_time)
-        let (new_nn, score) = univariate_loocv_search(
+        let (new_nn, score) = univariate_loocv_search_cached(
             y,
             d,
             control_mask,
@@ -710,6 +828,7 @@ pub fn cycling_parameter_search(
             max_iter,
             tol,
             x,
+            &score_cache,
         );
         lambda_nn = new_nn;
 
@@ -993,6 +1112,7 @@ pub fn loocv_grid_search_exhaustive(
     // keeps the interface uniform.
     let results: Vec<LoocvResultTuple> = grid_combinations
         .into_par_iter()
+        .with_max_len(1) // Enable fine-grained work-stealing for load balancing
         .map(|(lt, lu, ln)| {
             // Apply the same sentinel conversion as the other search paths
             // so behaviour stays consistent when the grid is supplied
@@ -1322,6 +1442,7 @@ pub fn loocv_grid_search_joint(
     // Parallel grid search
     let results: Vec<LoocvResultTuple> = grid_combinations
         .into_par_iter()
+        .with_max_len(1) // Enable fine-grained work-stealing for load balancing
         .map(|(lt, lu, ln)| {
             // Convert infinity values
             let lt_eff = if lt.is_infinite() { 0.0 } else { lt };
@@ -1480,6 +1601,10 @@ pub fn loocv_cycling_search_joint_with_stage1(
     let control_obs = get_control_observations(y, control_mask);
     let n_attempted = control_obs.len();
 
+    // P2.1: Score cache shared across Stage-1 and Stage-2 to avoid redundant
+    // joint LOOCV evaluations during coordinate descent cycling.
+    let joint_score_cache: CyclingScoreCache = Mutex::new(HashMap::new());
+
     // Helper closure: univariate search over one parameter grid (parallelized)
     // param_idx: 0=lambda_time, 1=lambda_unit, 2=lambda_nn
     // best_score_hint: upper bound for early termination pruning; use
@@ -1513,6 +1638,14 @@ pub fn loocv_cycling_search_joint_with_stage1(
                         _ => (f0, f1, val),
                     };
 
+                    // P2.1: Check cache before expensive evaluation
+                    let cache_key = (lt.to_bits(), lu.to_bits(), ln.to_bits());
+                    if let Ok(cache) = joint_score_cache.lock() {
+                        if let Some(&(cached_score, cached_n_valid, cached_failed)) = cache.get(&cache_key) {
+                            return (val, lt, lu, ln, cached_score, cached_n_valid, cached_failed);
+                        }
+                    }
+
                     let (score, n_valid, first_failed) = loocv_score_joint(
                         y,
                         d,
@@ -1526,6 +1659,14 @@ pub fn loocv_cycling_search_joint_with_stage1(
                         best_score_hint,
                         x,
                     );
+
+                    // Cache complete evaluations (not early-terminated)
+                    if n_valid == n_attempted || score == f64::INFINITY {
+                        if let Ok(mut cache) = joint_score_cache.lock() {
+                            cache.insert(cache_key, (score, n_valid, first_failed));
+                        }
+                    }
+
                     (val, lt, lu, ln, score, n_valid, first_failed)
                 })
                 .collect();

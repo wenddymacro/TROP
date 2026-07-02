@@ -23,6 +23,8 @@
        9     498      LOOCV failed for all combinations
       10     498      Insufficient bootstrap samples
       11    3302      General computation failure
+      12     198      Invalid finite population correction (FPC)
+      13     498      Singleton PSU in stratum
 
     Syntax:
         trop_handle_error <error_code> ["<error_msg>"]
@@ -258,6 +260,45 @@ program define trop_handle_error
         di as txt "  3. Try a different lambda grid"
 
         c_local _stata_rc 3302
+        c_local _should_exit 1
+    }
+
+    // --- code 12: invalid FPC ---
+    else if `error_code' == 12 {
+        di as error _n "{bf:Invalid Finite Population Correction (Code 12)}"
+        di as error "The FPC variable contains invalid values."
+        if "`error_msg'" != "" {
+            di as error "Details: `error_msg'"
+        }
+        di as txt _n "Possible causes:"
+        di as txt "  1. FPC values are not in the valid range (0, 1] or integers > n"
+        di as txt "  2. FPC variable contains missing values"
+        di as txt "  3. FPC is constant and uninformative"
+        di as txt _n "Suggestions:"
+        di as txt "  1. Check FPC values: {stata summarize fpcvar, detail}"
+        di as txt "  2. Ensure FPC > 0 for all strata"
+        di as txt "  3. Remove the fpc() option if not needed"
+
+        c_local _stata_rc 198
+        c_local _should_exit 1
+    }
+
+    // --- code 13: singleton PSU ---
+    else if `error_code' == 13 {
+        di as error _n "{bf:Singleton PSU Detected (Code 13)}"
+        di as error "One or more strata contain only a single PSU."
+        if "`error_msg'" != "" {
+            di as error "Details: `error_msg'"
+        }
+        di as txt _n "Possible causes:"
+        di as txt "  1. Stratum has only one primary sampling unit"
+        di as txt "  2. PSU-strata mapping is incorrect"
+        di as txt _n "Suggestions:"
+        di as txt "  1. Use singleunit(centered) to handle lonely PSUs"
+        di as txt "  2. Check strata/PSU structure: {stata tab stratavar psuvar}"
+        di as txt "  3. Consider collapsing small strata"
+
+        c_local _stata_rc 498
         c_local _should_exit 1
     }
 
