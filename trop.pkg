@@ -77,12 +77,12 @@ d
 d === Paper Datasets (install via: net get trop) ===
 d Note: cps_logwage, cps_urate, pwt_loggdp have real treatment indicators.
 d Note: germany_gdp, basque_gdp, smoking_packs have d=0 (for semi-synthetic simulation).
-g data/cps_logwage.dta
-g data/cps_urate.dta
-g data/pwt_loggdp.dta
-g data/germany_gdp.dta
-g data/basque_gdp.dta
-g data/smoking_packs.dta
+g cps_logwage.dta
+g cps_urate.dta
+g pwt_loggdp.dta
+g germany_gdp.dta
+g basque_gdp.dta
+g smoking_packs.dta
 d
 d === Ancillary Files (install via: net get trop) ===
 g ancillary/10_trop_stata.ipynb
