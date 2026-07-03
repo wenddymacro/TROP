@@ -2,7 +2,7 @@ v 3
 d TROP - Triply RObust Panel Estimator
 d Version: 1.2.0
 d Athey, Imbens, Qu & Viviano (2025)
-d Distribution-Date: 20260622
+d Distribution-Date: 20260703
 d License: AGPL-3.0
 d
 d === ADO Files ===
@@ -17,6 +17,8 @@ f ado/_trop_load_mata.ado
 f ado/_trop_set_grid.ado
 f ado/_trop_validate_params.ado
 f ado/_trop_cleanup_vars.ado
+f ado/trop_data.ado
+f ado/_trop_deploy_data.ado
 f ado/trop_check.ado
 f ado/trop_bootstrap.ado
 f ado/trop_estat_summarize.ado
@@ -74,15 +76,10 @@ d
 d === License ===
 f LICENSE
 d
-d === Paper Datasets (install via: net get trop) ===
+d === Paper Datasets (use: trop_data cps_logwage) ===
 d Note: cps_logwage, cps_urate, pwt_loggdp have real treatment indicators.
 d Note: germany_gdp, basque_gdp, smoking_packs have d=0 (for semi-synthetic simulation).
-g cps_logwage.dta
-g cps_urate.dta
-g pwt_loggdp.dta
-g germany_gdp.dta
-g basque_gdp.dta
-g smoking_packs.dta
+d Datasets are downloaded on first use via trop_data command and cached in adopath.
 d
 d === Ancillary Files (install via: net get trop) ===
 g ancillary/10_trop_stata.ipynb

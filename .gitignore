@@ -3,6 +3,9 @@
 *.smcl
 *.gph
 
+# Dataset copies in ado/ (data is served from data/ via GitHub)
+ado/*.dta
+
 # Build logs
 _*.log
 

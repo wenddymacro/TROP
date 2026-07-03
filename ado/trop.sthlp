@@ -774,9 +774,9 @@ wage effects on log wages across U.S. states.  The CPS dataset contains
 50 states observed from 1979 to 2018; 8 states are treated at t=2018.
 The outcome variable {cmd:y} is the log average weekly wage.
 
-{phang}{it:Step 1: Load the CPS log-wage panel}{p_end}
+{phang}{it:Step 1: Load the CPS log-wage panel (downloads once, then cached)}{p_end}
 
-{phang2}{cmd:. use "data/cps_logwage.dta", clear}{p_end}
+{phang2}{cmd:. trop_data cps_logwage}{p_end}
 {phang2}{cmd:. describe}{p_end}
 {phang2}{cmd:. tab d}{p_end}
 

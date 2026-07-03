@@ -299,6 +299,11 @@ program define trop, eclass
         }
     }
     
+    // --- One-time data deployment ------------------------------------------
+    // Silently deploy example datasets to adopath on first invocation.
+    // Uses findfile as sentinel; no-ops if data already cached.
+    capture noisily _trop_deploy_data
+
     // --- Lambda grid construction ------------------------------------------
     // Build the three-dimensional grid (lambda_time, lambda_unit, lambda_nn)
     // over which LOOCV minimizes Q(lambda).
