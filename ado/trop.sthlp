@@ -774,17 +774,21 @@ wage effects on log wages across U.S. states.  The CPS dataset contains
 50 states observed from 1979 to 2018; 8 states are treated at t=2018.
 The outcome variable {cmd:y} is the log average weekly wage.
 
-{phang}{it:Step 1: Load the CPS log-wage panel (downloads once, then cached)}{p_end}
+{phang}{it:Step 1: Download example data (one-time, after installation)}{p_end}
 
-{phang2}{cmd:. trop_data cps_logwage}{p_end}
+{phang2}{cmd:. net get trop}{p_end}
+
+{phang}{it:Step 2: Load the CPS log-wage panel}{p_end}
+
+{phang2}{cmd:. use cps_logwage.dta, clear}{p_end}
 {phang2}{cmd:. describe}{p_end}
 {phang2}{cmd:. tab d}{p_end}
 
-{phang}{it:Step 2: Estimate ATT using the twostep (local) method with bootstrap}{p_end}
+{phang}{it:Step 3: Estimate ATT using the twostep (local) method with bootstrap}{p_end}
 
 {phang2}{cmd:. trop y d, panelvar(id) timevar(t) method(twostep) bootstrap(200) seed(42)}{p_end}
 
-{phang}{it:Step 3: Examine stored results}{p_end}
+{phang}{it:Step 4: Examine stored results}{p_end}
 
 {phang2}{cmd:. ereturn list}{p_end}
 {phang2}{cmd:. display "ATT = " e(att)}{p_end}
@@ -792,13 +796,13 @@ The outcome variable {cmd:y} is the log average weekly wage.
 {phang2}{cmd:. display "95%% CI: [" e(ci_lower) ", " e(ci_upper) "]"}{p_end}
 {phang2}{cmd:. display "p-value = " e(pvalue)}{p_end}
 
-{phang}{it:Step 4: Inspect selected hyperparameters}{p_end}
+{phang}{it:Step 5: Inspect selected hyperparameters}{p_end}
 
 {phang2}{cmd:. display "lambda_time = " e(lambda_time)}{p_end}
 {phang2}{cmd:. display "lambda_unit = " e(lambda_unit)}{p_end}
 {phang2}{cmd:. display "lambda_nn   = " e(lambda_nn)}{p_end}
 
-{phang}{it:Step 5: Postestimation diagnostics}{p_end}
+{phang}{it:Step 6: Postestimation diagnostics}{p_end}
 
 {phang2}{cmd:. estat summarize}{p_end}
 {phang2}{cmd:. estat loocv}{p_end}

@@ -113,8 +113,8 @@ program define _trop_estat_bootstrap_graph
     // Create temporary dataset for plotting
     preserve
     clear
-    set obs `B'
-    gen double att_b = .
+    quietly set obs `B'
+    quietly gen double att_b = .
     
     forvalues i = 1/`B' {
         qui replace att_b = `boot_est'[`i', 1] in `i'

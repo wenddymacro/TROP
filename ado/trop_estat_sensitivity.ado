@@ -277,10 +277,11 @@ program define _graph_cv_1d
     preserve
     clear
     local n_points = rowsof(`cv_curve')
-    set obs `n_points'
-
-    gen double lambda_val = .
-    gen double cv_loss = .
+    quietly {
+        set obs `n_points'
+        gen double lambda_val = .
+        gen double cv_loss = .
+    }
 
     forvalues i = 1/`n_points' {
         qui replace lambda_val = `lambda_grid'[`i', `col'] in `i'
