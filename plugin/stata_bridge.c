@@ -738,7 +738,7 @@ static ST_retcode handle_loocv_twostep(void) {
     TROP_LOG_INFO("starting LOOCV grid search (twostep)");
 
     /* Progress feedback: display grid size before invoking the search */
-    if (g_verbose_level >= TROP_VERBOSE_NORMAL) {
+    if (g_verbose_level >= TROP_VERBOSE_DETAILED) {
         char pbuf[256];
         snprintf(pbuf, sizeof(pbuf),
                  "{txt}  LOOCV (twostep, cycling): evaluating grid...\n");
@@ -887,7 +887,7 @@ static ST_retcode handle_loocv_twostep(void) {
                   stage1_time, stage1_unit, stage1_nn);
 
     /* Progress feedback: LOOCV twostep cycling complete */
-    if (g_verbose_level >= TROP_VERBOSE_NORMAL) {
+    if (g_verbose_level >= TROP_VERBOSE_DETAILED) {
         char pbuf[256];
         double fail_pct = (n_attempted > 0) ? 100.0 * (1.0 - (double)n_valid / (double)n_attempted) : 0.0;
         snprintf(pbuf, sizeof(pbuf),
@@ -935,7 +935,7 @@ static ST_retcode handle_loocv_twostep_exhaustive(void) {
     TROP_LOG_INFO("starting LOOCV exhaustive grid search (twostep)");
 
     /* Progress feedback */
-    if (g_verbose_level >= TROP_VERBOSE_NORMAL) {
+    if (g_verbose_level >= TROP_VERBOSE_DETAILED) {
         SF_display("{txt}  LOOCV (twostep, exhaustive): evaluating grid...\n");
     }
 
@@ -1074,7 +1074,7 @@ static ST_retcode handle_loocv_twostep_exhaustive(void) {
                   best_time, best_unit, best_nn, best_score, n_valid, n_attempted, first_failed_t, first_failed_i);
 
     /* Progress feedback: LOOCV twostep exhaustive complete */
-    if (g_verbose_level >= TROP_VERBOSE_NORMAL) {
+    if (g_verbose_level >= TROP_VERBOSE_DETAILED) {
         char pbuf[256];
         int n_grid = lambda_time_len * lambda_unit_len * lambda_nn_len;
         double fail_pct = (n_attempted > 0) ? 100.0 * (1.0 - (double)n_valid / (double)n_attempted) : 0.0;
@@ -1126,7 +1126,7 @@ static ST_retcode handle_loocv_joint(void) {
     TROP_LOG_INFO("starting LOOCV cycling search (joint)");
 
     /* Progress feedback */
-    if (g_verbose_level >= TROP_VERBOSE_NORMAL) {
+    if (g_verbose_level >= TROP_VERBOSE_DETAILED) {
         SF_display("{txt}  LOOCV (joint, cycling): evaluating grid...\n");
     }
     
@@ -1256,7 +1256,7 @@ static ST_retcode handle_loocv_joint(void) {
                   stage1_time, stage1_unit, stage1_nn);
 
     /* Progress feedback: LOOCV joint cycling complete */
-    if (g_verbose_level >= TROP_VERBOSE_NORMAL) {
+    if (g_verbose_level >= TROP_VERBOSE_DETAILED) {
         char pbuf[256];
         double fail_pct = (n_attempted > 0) ? 100.0 * (1.0 - (double)n_valid / (double)n_attempted) : 0.0;
         snprintf(pbuf, sizeof(pbuf),
@@ -1317,7 +1317,7 @@ static ST_retcode handle_loocv_joint_exhaustive(void) {
     TROP_LOG_INFO("starting LOOCV exhaustive grid search (joint)");
 
     /* Progress feedback */
-    if (g_verbose_level >= TROP_VERBOSE_NORMAL) {
+    if (g_verbose_level >= TROP_VERBOSE_DETAILED) {
         SF_display("{txt}  LOOCV (joint, exhaustive): evaluating grid...\n");
     }
     
@@ -1437,7 +1437,7 @@ static ST_retcode handle_loocv_joint_exhaustive(void) {
                   best_time, best_unit, best_nn, best_score, n_valid, n_attempted, first_failed_t, first_failed_i);
 
     /* Progress feedback: LOOCV joint exhaustive complete */
-    if (g_verbose_level >= TROP_VERBOSE_NORMAL) {
+    if (g_verbose_level >= TROP_VERBOSE_DETAILED) {
         char pbuf[256];
         int n_grid = lambda_time_len * lambda_unit_len * lambda_nn_len;
         double fail_pct = (n_attempted > 0) ? 100.0 * (1.0 - (double)n_valid / (double)n_attempted) : 0.0;
@@ -1488,7 +1488,7 @@ static ST_retcode handle_estimate_twostep(void) {
     SF_scal_save("__trop_condition_number", SV_missval);
 
     /* Progress feedback */
-    if (g_verbose_level >= TROP_VERBOSE_NORMAL) {
+    if (g_verbose_level >= TROP_VERBOSE_DETAILED) {
         SF_display("{txt}  Estimation (twostep): fitting model...\n");
     }
     
@@ -1822,7 +1822,7 @@ static ST_retcode handle_estimate_joint(void) {
     SF_scal_save("__trop_condition_number", SV_missval);
 
     /* Progress feedback */
-    if (g_verbose_level >= TROP_VERBOSE_NORMAL) {
+    if (g_verbose_level >= TROP_VERBOSE_DETAILED) {
         SF_display("{txt}  Estimation (joint): fitting model...\n");
     }
     
@@ -2111,7 +2111,7 @@ static ST_retcode handle_bootstrap_twostep(void) {
     TROP_LOG_INFO("starting bootstrap variance estimation (twostep)");
 
     /* Progress feedback */
-    if (g_verbose_level >= TROP_VERBOSE_NORMAL) {
+    if (g_verbose_level >= TROP_VERBOSE_DETAILED) {
         SF_display("{txt}  Bootstrap (twostep): resampling...\n");
     }
     
@@ -2294,7 +2294,7 @@ static ST_retcode handle_bootstrap_twostep(void) {
                   se, n_valid, n_bootstrap);
 
     /* Progress feedback: bootstrap twostep complete */
-    if (g_verbose_level >= TROP_VERBOSE_NORMAL) {
+    if (g_verbose_level >= TROP_VERBOSE_DETAILED) {
         char pbuf[256];
         snprintf(pbuf, sizeof(pbuf),
                  "{txt}  Bootstrap (twostep) complete: %d/%d replications, SE = %.6f\n",
@@ -2344,7 +2344,7 @@ static ST_retcode handle_bootstrap_joint(void) {
     TROP_LOG_INFO("starting bootstrap variance estimation (joint)");
 
     /* Progress feedback */
-    if (g_verbose_level >= TROP_VERBOSE_NORMAL) {
+    if (g_verbose_level >= TROP_VERBOSE_DETAILED) {
         SF_display("{txt}  Bootstrap (joint): resampling...\n");
     }
     
@@ -2518,7 +2518,7 @@ static ST_retcode handle_bootstrap_joint(void) {
                   se, n_valid, n_bootstrap);
 
     /* Progress feedback: bootstrap joint complete */
-    if (g_verbose_level >= TROP_VERBOSE_NORMAL) {
+    if (g_verbose_level >= TROP_VERBOSE_DETAILED) {
         char pbuf[256];
         snprintf(pbuf, sizeof(pbuf),
                  "{txt}  Bootstrap (joint) complete: %d/%d replications, SE = %.6f\n",
@@ -2567,7 +2567,7 @@ static ST_retcode handle_bootstrap_rao_wu_twostep(void) {
     TROP_LOG_INFO("starting Rao-Wu bootstrap variance estimation (twostep)");
 
     /* Progress feedback */
-    if (g_verbose_level >= TROP_VERBOSE_NORMAL) {
+    if (g_verbose_level >= TROP_VERBOSE_DETAILED) {
         SF_display("{txt}  Rao-Wu Bootstrap (twostep): resampling...\n");
     }
     
@@ -2731,7 +2731,7 @@ static ST_retcode handle_bootstrap_rao_wu_twostep(void) {
                   se, n_valid, n_bootstrap);
 
     /* Progress feedback: Rao-Wu bootstrap twostep complete */
-    if (g_verbose_level >= TROP_VERBOSE_NORMAL) {
+    if (g_verbose_level >= TROP_VERBOSE_DETAILED) {
         char pbuf[256];
         snprintf(pbuf, sizeof(pbuf),
                  "{txt}  Bootstrap (Rao-Wu, twostep) complete: %d/%d replications, SE = %.6f\n",
@@ -2798,7 +2798,7 @@ static ST_retcode handle_bootstrap_rao_wu_joint(void) {
     TROP_LOG_INFO("starting Rao-Wu bootstrap variance estimation (joint)");
 
     /* Progress feedback */
-    if (g_verbose_level >= TROP_VERBOSE_NORMAL) {
+    if (g_verbose_level >= TROP_VERBOSE_DETAILED) {
         SF_display("{txt}  Rao-Wu Bootstrap (joint): resampling...\n");
     }
     
@@ -2953,7 +2953,7 @@ static ST_retcode handle_bootstrap_rao_wu_joint(void) {
                   se, n_valid, n_bootstrap);
 
     /* Progress feedback: Rao-Wu bootstrap joint complete */
-    if (g_verbose_level >= TROP_VERBOSE_NORMAL) {
+    if (g_verbose_level >= TROP_VERBOSE_DETAILED) {
         char pbuf[256];
         snprintf(pbuf, sizeof(pbuf),
                  "{txt}  Bootstrap (Rao-Wu, joint) complete: %d/%d replications, SE = %.6f\n",

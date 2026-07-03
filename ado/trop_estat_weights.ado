@@ -74,7 +74,7 @@ end
 program define _estat_weights_twostep
     di as txt ""
     di as txt "Weight Distribution (Twostep; Algorithm 2 default)"
-    di as txt "{hline 61}"
+    di as txt "{hline 78}"
     di as txt "Note: Weights vary by treated observation. Showing statistics"
     di as txt "      for first treated observation."
     di as txt ""
@@ -113,7 +113,7 @@ program define _estat_weights_twostep
         di as txt "Unit weights (omega): (not available)"
     }
     
-    di as txt "{hline 61}"
+    di as txt "{hline 78}"
 end
 
 /*==============================================================================
@@ -125,7 +125,7 @@ end
 program define _estat_weights_joint
     di as txt ""
     di as txt "Weight Distribution (Joint; shared-tau extension)"
-    di as txt "{hline 61}"
+    di as txt "{hline 78}"
     
     capture confirm matrix e(delta_time)
     local has_delta_time = (_rc == 0)
@@ -153,7 +153,7 @@ program define _estat_weights_joint
         di as txt "  (not available)"
     }
     
-    di as txt "{hline 61}"
+    di as txt "{hline 78}"
 end
 
 /*==============================================================================
@@ -165,7 +165,7 @@ end
 program define _estat_weights_generic
     di as txt ""
     di as txt "Weight Distribution"
-    di as txt "{hline 61}"
+    di as txt "{hline 78}"
     
     capture confirm matrix e(theta)
     if !_rc {
@@ -180,7 +180,7 @@ program define _estat_weights_generic
         mata: _display_weight_vector_stats("e(omega)", "unit")
     }
     
-    di as txt "{hline 61}"
+    di as txt "{hline 78}"
 end
 
 /*==============================================================================

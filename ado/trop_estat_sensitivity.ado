@@ -78,9 +78,9 @@ end
 
 program define _display_grid_sensitivity
     di as txt ""
-    di as txt "{hline 72}"
+    di as txt "{hline 78}"
     di as txt "Hyperparameter Sensitivity Analysis"
-    di as txt "{hline 72}"
+    di as txt "{hline 78}"
 
     local opt_time = e(lambda_time)
     local opt_unit = e(lambda_unit)
@@ -113,15 +113,15 @@ program define _display_grid_sensitivity
 
     // Display grid summary table
     di as txt "Grid search space:"
-    di as txt "{hline 72}"
+    di as txt "{hline 78}"
     di as txt "  Parameter       Grid points    Min        Max        Optimal"
-    di as txt "{hline 72}"
+    di as txt "{hline 78}"
 
     mata: _display_grid_row("time")
     mata: _display_grid_row("unit")
     mata: _display_grid_row("nn")
 
-    di as txt "{hline 72}"
+    di as txt "{hline 78}"
 
     // Optimal LOOCV score
     di as txt ""
@@ -137,7 +137,7 @@ program define _display_grid_sensitivity
         di as txt "  " as res "No boundary issues detected." as txt " Optimal is interior to all grids."
     }
 
-    di as txt "{hline 72}"
+    di as txt "{hline 78}"
 
     // Total grid size
     capture confirm matrix e(lambda_grid)
@@ -171,9 +171,9 @@ program define _display_full_sensitivity
     local n_display = min(`n_display', `n_grid')
 
     di as txt ""
-    di as txt "{hline 77}"
+    di as txt "{hline 78}"
     di as txt "Hyperparameter Sensitivity Analysis (Full Grid)"
-    di as txt "{hline 77}"
+    di as txt "{hline 78}"
 
     // Find the row corresponding to the optimal hyperparameters
     mata: _find_optimal_row()
@@ -186,7 +186,7 @@ program define _display_full_sensitivity
     di as txt "Grid search results (showing `n_display' points with lowest CV loss):"
     di as txt ""
     di as txt "  lambda_time  lambda_unit  lambda_nn   CV_loss"
-    di as txt "{hline 77}"
+    di as txt "{hline 78}"
 
     forvalues i = 1/`n_display' {
         local row_idx = r(display_row_`i')
@@ -208,7 +208,7 @@ program define _display_full_sensitivity
             as txt "    `marker'"
     }
 
-    di as txt "{hline 77}"
+    di as txt "{hline 78}"
     di as txt "* Optimal hyperparameters"
 
     // Compute sensitivity metrics
@@ -221,7 +221,7 @@ program define _display_full_sensitivity
     di as txt "  CV loss range:            [" as res %6.3f r(cv_min) ///
         as txt ", " as res %6.3f r(cv_max) as txt "]"
     di as txt "  Relative range:           " as res %6.1f r(cv_rel_range) "%"
-    di as txt "{hline 77}"
+    di as txt "{hline 78}"
 end
 
 /*

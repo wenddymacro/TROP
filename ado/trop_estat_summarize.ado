@@ -28,9 +28,9 @@ program define trop_estat_summarize
 
     // Display estimation sample dimensions
     di as txt ""
-    di as txt "{hline 65}"
+    di as txt "{hline 78}"
     di as txt "Estimation sample summary"
-    di as txt "{hline 65}"
+    di as txt "{hline 78}"
 
     local balance_text = cond(e(balanced) == 1, "(balanced panel)", "(unbalanced panel)")
 
@@ -143,7 +143,7 @@ program define trop_estat_summarize
         di as txt "  Time var:      " as res "`e(timevar)'"
     }
 
-    di as txt "{hline 65}"
+    di as txt "{hline 78}"
 
     // Output detailed treatment distribution if requested
     if "`detailed'" != "" {

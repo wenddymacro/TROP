@@ -61,13 +61,13 @@ program define _trop_estat_distance, rclass
 
     // Check for zero valid pairs
     if scalar(__ed_N_pairs) == 0 | missing(scalar(__ed_N_pairs)) {
-        di as txt _n "{hline 62}"
+        di as txt _n "{hline 78}"
         di as txt "Unit Distance Distribution (Eq.3: RMSE over control periods)"
-        di as txt "{hline 62}"
+        di as txt "{hline 78}"
         di as txt "  {it:No valid unit pairs found.}"
         di as txt "  All unit pairs lack common non-treated periods with"
         di as txt "  non-missing outcomes, so distances cannot be computed."
-        di as txt "{hline 62}"
+        di as txt "{hline 78}"
         return scalar N_pairs = 0
         capture scalar drop __ed_N_pairs
         capture scalar drop __ed_mean
@@ -85,9 +85,9 @@ program define _trop_estat_distance, rclass
        3. Display results table
     ────────────────────────────────────────────────────────────────────── */
 
-    di as txt _n "{hline 62}"
+    di as txt _n "{hline 78}"
     di as txt "Unit Distance Distribution (Eq.3: RMSE over control periods)"
-    di as txt "{hline 62}"
+    di as txt "{hline 78}"
     di as txt "  Number of unit pairs: " as res %10.0f scalar(__ed_N_pairs)
     di as txt "  Mean distance:        " as res %10.4f scalar(__ed_mean)
     di as txt "  Std. deviation:       " as res %10.4f scalar(__ed_sd)
@@ -96,7 +96,7 @@ program define _trop_estat_distance, rclass
     di as txt "  Median:               " as res %10.4f scalar(__ed_p50)
     di as txt "  75th percentile:      " as res %10.4f scalar(__ed_p75)
     di as txt "  Maximum:              " as res %10.4f scalar(__ed_max)
-    di as txt "{hline 62}"
+    di as txt "{hline 78}"
 
     /* ──────────────────────────────────────────────────────────────────────
        4. Weight interpretation (if lambda_unit available)

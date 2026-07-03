@@ -249,7 +249,7 @@ void _trop_estat_bootstrap_display(real colvector boot_est,
     // ========== Display title ==========
     printf("\n")
     printf("{txt}Bootstrap Distribution Analysis\n")
-    printf("{txt}{hline 61}\n")
+    printf("{txt}{hline 78}\n")
     
     // ========== Display sample information ==========
     printf("{txt}Bootstrap samples:  B = {res}%g\n", B)
@@ -311,7 +311,7 @@ void _trop_estat_bootstrap_display(real colvector boot_est,
         printf("{txt}  {res}(skipped: all bootstrap estimates identical, sd=0)\n")
     }
     
-    printf("{txt}{hline 61}\n")
+    printf("{txt}{hline 78}\n")
 }
 
 end

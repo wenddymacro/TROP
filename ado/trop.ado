@@ -279,10 +279,6 @@ program define trop, eclass
     }
 
     // --- Plugin loading ---------------------------------------------------
-    if "`verbose'" != "" {
-        di as txt _n "Loading plugin..."
-    }
-
     capture _trop_load_plugin
     if _rc {
         di as error "Error: TROP plugin not found. The compiled plugin is required."
@@ -292,22 +288,27 @@ program define trop, eclass
         di as error "See {help trop##installation:trop installation} for details."
         exit 601
     }
-    else {
-        if "`verbose'" != "" {
-            di as txt "  Platform: `_platform_desc'"
-            di as txt "  Plugin: `_plugin_name'"
-        }
-    }
     
     // --- One-time data deployment ------------------------------------------
     // Silently deploy example datasets to adopath on first invocation.
     // Uses findfile as sentinel; no-ops if data already cached.
     capture noisily _trop_deploy_data
 
+    // --- Verbose level (early resolution) ----------------------------------
+    // Resolve level here so that display guards below can use numeric thresholds.
+    // The scalar write and backward-compat shim remain at the later block.
+    local _verbose_level = 1
+    if `vlevel' >= 0 {
+        local _verbose_level = `vlevel'
+    }
+    else if "`verbose'" != "" {
+        local _verbose_level = 2
+    }
+
     // --- Lambda grid construction ------------------------------------------
     // Build the three-dimensional grid (lambda_time, lambda_unit, lambda_nn)
     // over which LOOCV minimizes Q(lambda).
-    if "`verbose'" != "" {
+    if `_verbose_level' >= 3 {
         di as txt _n "Setting lambda grids..."
     }
 
@@ -323,7 +324,7 @@ program define trop, eclass
     local n_combinations = `_n_combinations'
     local n_per_cycle = `_n_per_cycle'
 
-    if "`verbose'" != "" {
+    if `_verbose_level' >= 3 {
         di as txt "  Grid style: `_grid_style'"
         di as txt "  lambda_time: `_n_time' values"
         di as txt "  lambda_unit: `_n_unit' values"
@@ -333,7 +334,7 @@ program define trop, eclass
     }
 
     // --- Parameter validation ---------------------------------------------
-    if "`verbose'" != "" {
+    if `_verbose_level' >= 3 {
         di as txt _n "Validating parameters..."
     }
 
@@ -348,7 +349,7 @@ program define trop, eclass
         seed(`seed') ///
         touse(`touse')
 
-    if "`verbose'" != "" {
+    if `_verbose_level' >= 3 {
         di as txt "  All parameters valid"
     }
 
@@ -382,7 +383,7 @@ program define trop, eclass
             }
         }
         local _n_covariates : word count `covariates'
-        if "`verbose'" != "" {
+        if `_verbose_level' >= 3 {
             di as txt "  Covariates (`_n_covariates'): `covariates'"
         }
     }
@@ -393,14 +394,14 @@ program define trop, eclass
     _trop_load_mata
     
     // --- Data validation ---------------------------------------------------
-    if "`verbose'" != "" {
+    if `_verbose_level' >= 3 {
         di as txt _n "Validating data..."
     }
 
     // Drop temporary variables that may persist from a prior estimation run
     _trop_cleanup_vars
 
-    if "`verbose'" != "" {
+    if `_verbose_level' >= 3 {
         capture noisily trop_validate `depvar' `treatvar' if `touse', ///
             panelvar(`panelvar') timevar(`timevar')
     }
@@ -410,7 +411,7 @@ program define trop, eclass
     }
 
     if _rc != 0 {
-        if "`verbose'" == "" {
+        if `_verbose_level' < 3 {
             // Re-run with output so the user can see what failed
             noisily trop_validate `depvar' `treatvar' if `touse', ///
                 panelvar(`panelvar') timevar(`timevar')
@@ -449,7 +450,7 @@ program define trop, eclass
     local n_pre_periods = e(n_pre_periods)
     local n_post_periods = e(n_post_periods)
 
-    if "`verbose'" != "" {
+    if `_verbose_level' >= 3 {
         di as txt "  Data validation passed"
         di as txt "  Units (N): `N'"
         di as txt "  Periods (T): `T_val'"
@@ -763,12 +764,12 @@ program define trop, eclass
 
             if `_panel_size' >= 500000 {
                 local _est_minutes = `_est_seconds' / 60
-                di as txt _n "{it:预计计算时间: ~" %4.1f `_est_minutes' " 分钟}"
+                di as txt _n "{it:Estimated time: ~" %4.1f `_est_minutes' " min}"
             }
             else {
-                di as txt _n "{it:预计计算时间: ~" %4.0f `_est_seconds' " 秒}"
+                di as txt _n "{it:Estimated time: ~" %4.0f `_est_seconds' " sec}"
             }
-            di as txt "{it:(使用 notiming 选项可隐藏此信息)}"
+            di as txt "{it:(use notiming to suppress)}"
         }
     }
 
@@ -1211,86 +1212,7 @@ program define trop, eclass
         exit `_fatal_rc'
     }
     
-    // --- Display results ----------------------------------------------------
-    di as txt _n "{hline 78}"
-    di as txt "TROP Estimation Results"
-    di as txt "{hline 78}"
-
-    if "`method'" == "twostep" {
-        di as txt "Method:" _col(20) as res "twostep" ///
-            as txt " (paper Algorithm 2; default, heterogeneous tau_it)"
-        di as txt "Interpretation:" _col(20) as res "ATT averages cell-specific tau_it"
-    }
-    else {
-        di as txt "Method:" _col(20) as res "joint" ///
-            as txt " (Remark 6.1 extension; homogeneous tau)"
-        di as txt "Interpretation:" _col(20) as res "single shared tau across treated cells"
-        di as txt "Timing restriction:" _col(20) as res "simultaneous adoption required"
-    }
-    if `run_cv' {
-        if ("`method'" == "joint" & "`joint_loocv'" == "exhaustive") | ///
-           ("`method'" == "twostep" & "`twostep_loocv'" == "exhaustive") {
-            di as txt "Grid search:" _col(20) as res "`grid_style'" ///
-                as txt " (`n_combinations' total grid points)"
-        }
-        else {
-            di as txt "Grid search:" _col(20) as res "`grid_style'" ///
-                as txt " (`n_per_cycle' grid points/cycle)"
-        }
-    }
-    else {
-        di as txt "Grid search:" _col(20) as res "`grid_style'" ///
-            as txt " (unused; fixedlambda())"
-    }
-    if "`method'" == "joint" & `run_cv' {
-        if "`joint_loocv'" == "exhaustive" {
-            di as txt "Joint LOOCV:" _col(20) as res "exhaustive" as txt " (Cartesian product; default, guaranteed grid argmin)"
-        }
-        else {
-            di as txt "Joint LOOCV:" _col(20) as res "cycling" as txt " (coordinate descent; faster but may select a different lambda)"
-        }
-    }
-    if "`method'" == "twostep" & `run_cv' {
-        if "`twostep_loocv'" == "exhaustive" {
-            di as txt "Twostep LOOCV:" _col(20) as res "exhaustive" as txt " (Cartesian product; guaranteed global minimum)"
-        }
-        else {
-            di as txt "Twostep LOOCV:" _col(20) as res "cycling" as txt " (coordinate descent; default, faster)"
-        }
-    }
-    di as txt ""
-    di as txt "Panel dimensions:" _col(20) as res "N = `N', T = `T_val'"
-    di as txt "Observations:" _col(20) as res "`N_obs'"
-    di as txt "Treated:" _col(20) as res "`N_treat'" as txt " (" %4.1f 100*`N_treat'/`N_obs' "%)"
-
-    // Selected or fixed hyperparameters
-    if !missing(e(lambda_time)) {
-        if `run_cv' {
-            di as txt _n "Selected hyperparameters (via LOOCV):"
-        }
-        else {
-            di as txt _n "Fixed hyperparameters (LOOCV skipped):"
-        }
-        di as txt "  lambda_time = " as res %8.4f e(lambda_time)
-        di as txt "  lambda_unit = " as res %8.4f e(lambda_unit)
-        if missing(e(lambda_nn)) {
-            // Stata missing here signals the DID/TWFE corner (lambda_nn = +inf,
-            // Eq. 2 remark: L identically zero).  Render explicitly so the user
-            // sees a human-readable marker rather than the bare "."
-            // rendered by %8.4f.
-            di as txt "  lambda_nn   = " as res "    +inf" as txt " (DID/TWFE corner)"
-        }
-        else {
-            di as txt "  lambda_nn   = " as res %8.4f e(lambda_nn)
-        }
-
-        if !missing(e(loocv_score)) {
-            di as txt "  Q(lambda_hat) = " as res %10.6f e(loocv_score)
-        }
-    }
-
-    // Point estimate and inference
-    di as txt _n "Treatment Effect (ATT):"
+    // --- Display results (Stata standard format) --------------------------------
 
     local att = e(att)
     local se = e(se)
@@ -1299,156 +1221,191 @@ program define trop, eclass
     local pvalue = e(pvalue)
     local tstat = e(t)
 
-    // Three candidate intervals are always stored by trop_ereturn_store:
-    //   e(ci_lower_t)/e(ci_upper_t)               t(N_1 - 1) wrap
-    //   e(ci_lower_normal)/e(ci_upper_normal)     standard-normal wrap
-    //   e(ci_lower_percentile)/e(ci_upper_percentile)  paper Alg 3 quantiles
-    // e(ci_lower)/e(ci_upper) holds whichever one `cimethod()` selected.
-    local ci_lower_t    = e(ci_lower_t)
-    local ci_upper_t    = e(ci_upper_t)
-    local ci_lower_nor  = e(ci_lower_normal)
-    local ci_upper_nor  = e(ci_upper_normal)
-    local ci_lower_pct  = e(ci_lower_percentile)
-    local ci_upper_pct  = e(ci_upper_percentile)
-    local cimethod_used = "`e(cimethod)'"
-    local bsvariance_used = "`e(bsvariance)'"
-
-    di as txt "  tau     = " as res %12.6f `att'
+    // ─── Header with right-aligned metadata ─────────────────────────────────────
+    di as txt ""
+    di as txt "{hline 78}"
+    local _col2 = 49
+    di as txt "Triply Robust Panel Estimator" ///
+        _col(`_col2') "Number of obs"   _col(68) "=" _col(70) as res %8.0fc `N_obs'
+    di as txt "Method: " as res "`method'" ///
+        _col(`_col2') as txt "Number of units" _col(68) "=" _col(70) as res %8.0fc `N'
+    di as txt "" ///
+        _col(`_col2') "Time periods"    _col(68) "=" _col(70) as res %8.0fc `T_val'
+    di as txt "" ///
+        _col(`_col2') "Treated obs"     _col(68) "=" _col(70) as res %8.0fc `N_treat'
     if `bootstrap' > 0 {
-        di as txt "  SE     = " as res %12.6f `se'
-        di as txt "  t      = " as res %12.4f `tstat'
-        di as txt "  p-value= " as res %12.4f `pvalue'
-        if "`bsvariance_used'" == "paper" {
-            di as txt "  SE denom= " as res "paper (1/B)"
-        }
-        else {
-            di as txt "  SE denom= " as res "sample (1/(B-1))"
-        }
-        // Header for the primary interval: annotate with the cimethod
-        // selection so users can reproduce which interval is primary.
-        local _ci_label "`cimethod_used'"
-        if strpos("`cimethod_used'", "->") {
-            local _ci_label "`cimethod_used' (downgraded)"
-        }
-        di as txt "  `level'% CI [" as res "`_ci_label'" as txt "]" _col(27) "= [" ///
-            as res %12.6f `ci_lower' as txt ", " ///
-            as res %12.6f `ci_upper' as txt "]"
-        // Auxiliary intervals: every stored candidate that is NOT the
-        // primary one is echoed below so analysts can compare parametric
-        // and distribution-free intervals at a glance.
-        local _downpos = strpos("`cimethod_used'", "->")
-        if `_downpos' > 0 {
-            local _primary = substr("`cimethod_used'", `_downpos' + 2, length("`cimethod_used'"))
-        }
-        else {
-            local _primary "`cimethod_used'"
-        }
-        if "`_primary'" != "t" & !missing(`ci_lower_t') & !missing(`ci_upper_t') {
-            di as txt "  `level'% CI [t]"           _col(27) "= [" ///
-                as res %12.6f `ci_lower_t'   as txt ", " ///
-                as res %12.6f `ci_upper_t'   as txt "]"
-        }
-        if "`_primary'" != "normal" & !missing(`ci_lower_nor') & !missing(`ci_upper_nor') {
-            di as txt "  `level'% CI [normal]"      _col(27) "= [" ///
-                as res %12.6f `ci_lower_nor' as txt ", " ///
-                as res %12.6f `ci_upper_nor' as txt "]"
-        }
-        if "`_primary'" != "percentile" & !missing(`ci_lower_pct') & !missing(`ci_upper_pct') {
-            di as txt "  `level'% CI [percentile]"  _col(27) "= [" ///
-                as res %12.6f `ci_lower_pct' as txt ", " ///
-                as res %12.6f `ci_upper_pct' as txt "]" ///
-                as txt "  {it:(paper Alg 3)}"
-        }
+        di as txt "" ///
+            _col(`_col2') "Bootstrap reps"  _col(68) "=" _col(70) as res %8.0fc `bootstrap'
+    }
+
+    // ─── Coefficient table ──────────────────────────────────────────────────────
+    di as txt "{hline 13}{c TT}{hline 64}"
+    if `bootstrap' > 0 {
+        di as txt _col(14) "{c |}" ///
+            _col(21) "ATT" ///
+            _col(31) "Std. err." ///
+            _col(44) "t" ///
+            _col(50) "P>|t|" ///
+            _col(59) "[`level'% conf. interval]"
     }
     else {
-        di as txt "  SE     = " as res "(not computed)" ///
-            as txt "  {it:use {bf:bootstrap()} option}"
-        di as txt "  t      = " as res "(not computed)"
-        di as txt "  p-value= " as res "(not computed)"
-        di as txt "  `level'% CI = " as res "(not computed)"
+        di as txt _col(14) "{c |}" _col(21) "ATT"
+    }
+    di as txt "{hline 13}{c +}{hline 64}"
+
+    // Data row: treatment variable
+    local _tvar "`e(treatvar)'"
+    if "`_tvar'" == "" local _tvar "d"
+    if `bootstrap' > 0 {
+        di as txt %12s abbrev("`_tvar'", 12) " {c |}" ///
+            as res _col(16) %10.6f `att' ///
+            _col(29) %10.6f `se' ///
+            _col(41) %8.2f `tstat' ///
+            _col(49) %7.3f `pvalue' ///
+            _col(58) %10.6f `ci_lower' ///
+            _col(70) %10.6f `ci_upper'
+    }
+    else {
+        di as txt %12s abbrev("`_tvar'", 12) " {c |}" ///
+            as res _col(16) %10.6f `att'
     }
 
-    // Global intercept (joint method only)
-    if "`method'" == "joint" & !missing(e(mu)) {
-        di as txt _n "Global intercept:"
-        di as txt "  mu     = " as res %12.6f e(mu)
-    }
-
-    // Covariate coefficients
+    // Covariate gamma rows (if covariates present)
     if `_n_covariates' > 0 {
-        di as txt _n "Covariate coefficients (Eq.14 gamma):"
+        di as txt "{hline 13}{c +}{hline 64}"
+        di as txt _col(2) "{it:Covariates (Eq.14 gamma)}" _col(14) "{c |}"
         local _j = 1
         foreach var of local covariates {
             local _gamma_j = e(gamma)[1, `_j']
-            di as txt "  `var'" _col(20) "= " as res %12.6f `_gamma_j'
+            di as txt %12s abbrev("`var'", 12) " {c |}" ///
+                as res _col(16) %10.6f `_gamma_j'
             local ++_j
         }
     }
 
-    // Convergence diagnostics
+    // Table bottom
+    di as txt "{hline 13}{c BT}{hline 64}"
+
+    // ─── Footer notes (compact) ─────────────────────────────────────────────────
+
+    // Lambda line
+    local _lambda_source = cond(`run_cv', "LOOCV", "fixed")
+    if missing(e(lambda_nn)) {
+        di as txt "Lambda: time = " as res %5.3f e(lambda_time) ///
+            as txt ", unit = " as res %5.3f e(lambda_unit) ///
+            as txt ", nn = " as res "+inf" as txt " (`_lambda_source')"
+    }
+    else {
+        di as txt "Lambda: time = " as res %5.3f e(lambda_time) ///
+            as txt ", unit = " as res %5.3f e(lambda_unit) ///
+            as txt ", nn = " as res %5.3f e(lambda_nn) as txt " (`_lambda_source')"
+    }
+
+    // Convergence (single line)
     if !missing(e(converged)) {
-        di as txt _n "Convergence:"
-        local conv_status = cond(e(converged)==1, "Yes", "No")
-        di as txt "  Converged: " as res "`conv_status'"
+        local _conv = cond(e(converged)==1, "Yes", "No")
+        local _iter_info = ""
         if !missing(e(n_iterations)) {
-            // twostep: maximum across per-observation fits;
-            // joint: total model iterations.
-            if "`method'" == "twostep" {
-                di as txt "  Iterations (max per-obs): " as res e(n_iterations)
+            local _iter_info = " (" + string(e(n_iterations)) + " iterations)"
+        }
+        di as txt "Convergence: " as res "`_conv'" as txt "`_iter_info'"
+    }
+
+    // No-bootstrap note
+    if `bootstrap' == 0 {
+        di as txt "{it:Note: SE/CI require bootstrap(); re-run with bootstrap(200).}"
+    }
+
+    // Global intercept (joint only)
+    if "`method'" == "joint" & !missing(e(mu)) {
+        di as txt "Global intercept (mu): " as res %10.6f e(mu)
+    }
+
+    // ─── Verbose 2+ diagnostics ─────────────────────────────────────────────────
+    if `_verbose_level' >= 2 {
+        di as txt ""
+        // LOOCV score
+        if !missing(e(loocv_score)) {
+            di as txt "  Q(lambda_hat) = " as res %10.6f e(loocv_score)
+        }
+        // LOOCV/Grid strategy details
+        if `run_cv' {
+            if "`method'" == "joint" {
+                di as txt "  LOOCV strategy: " as res "`joint_loocv'"
             }
             else {
-                di as txt "  Iterations: " as res e(n_iterations)
+                di as txt "  LOOCV strategy: " as res "`twostep_loocv'"
             }
         }
+        // Auxiliary CIs (non-primary intervals)
+        if `bootstrap' > 0 {
+            local cimethod_used = "`e(cimethod)'"
+            local _downpos = strpos("`cimethod_used'", "->")
+            if `_downpos' > 0 {
+                local _primary = substr("`cimethod_used'", `_downpos' + 2, length("`cimethod_used'"))
+            }
+            else {
+                local _primary "`cimethod_used'"
+            }
+            local ci_lower_t = e(ci_lower_t)
+            local ci_upper_t = e(ci_upper_t)
+            local ci_lower_nor = e(ci_lower_normal)
+            local ci_upper_nor = e(ci_upper_normal)
+            local ci_lower_pct = e(ci_lower_percentile)
+            local ci_upper_pct = e(ci_upper_percentile)
+
+            if "`_primary'" != "t" & !missing(`ci_lower_t') & !missing(`ci_upper_t') {
+                di as txt "  `level'% CI [t]:" _col(27) "[" ///
+                    as res %10.6f `ci_lower_t' as txt ", " ///
+                    as res %10.6f `ci_upper_t' as txt "]"
+            }
+            if "`_primary'" != "normal" & !missing(`ci_lower_nor') & !missing(`ci_upper_nor') {
+                di as txt "  `level'% CI [normal]:" _col(27) "[" ///
+                    as res %10.6f `ci_lower_nor' as txt ", " ///
+                    as res %10.6f `ci_upper_nor' as txt "]"
+            }
+            if "`_primary'" != "percentile" & !missing(`ci_lower_pct') & !missing(`ci_upper_pct') {
+                di as txt "  `level'% CI [percentile]:" _col(27) "[" ///
+                    as res %10.6f `ci_lower_pct' as txt ", " ///
+                    as res %10.6f `ci_upper_pct' as txt "]"
+            }
+            // SE denominator
+            local bsvariance_used = "`e(bsvariance)'"
+            if "`bsvariance_used'" == "paper" {
+                di as txt "  SE denominator: " as res "paper (1/B)"
+            }
+            else {
+                di as txt "  SE denominator: " as res "sample (1/(B-1))"
+            }
+            // Bootstrap summary
+            di as txt "  Bootstrap: " as res "`bootstrap'" as txt " reps, alpha = " as res e(bsalpha)
+        }
+        // Convergence detail (twostep)
         if "`method'" == "twostep" {
             capture confirm scalar e(n_obs_estimated)
             if !_rc & !missing(e(n_obs_estimated)) {
                 di as txt "  Obs estimated: " as res e(n_obs_estimated)
                 capture confirm scalar e(n_obs_failed)
                 if !_rc & !missing(e(n_obs_failed)) & e(n_obs_failed) > 0 {
-                    di as txt "  Obs failed:    " as res e(n_obs_failed)
+                    di as txt "  Obs failed: " as res e(n_obs_failed)
                 }
             }
         }
-    }
-
-    // Nuisance-parameter semantics note (twostep only)
-    if "`method'" == "twostep" {
-        di as txt _n "{it:Note: e(alpha)/e(beta)/e(factor_matrix) are averages across}"
-        di as txt "{it:      treated observations (each treated cell fits its own model).}"
-        di as txt `"{it:      Per-observation estimates are not stored; see e(alpha_semantics)="obs_average".}"'
-    }
-
-    // Bootstrap summary
-    if `bootstrap' > 0 {
-        di as txt _n "Bootstrap inference (paper Alg 3):"
-        di as txt "  Replications: " as res `bootstrap'
-        di as txt "  Alpha level: " as res `bsalpha'
-    }
-    else {
-        di as txt _n "{it:Note: Bootstrap inference skipped (bootstrap(0)).}"
-        di as txt "{it:  Standard errors per Athey et al. (2025) Algorithm 3 require bootstrap.}"
-        di as txt "{it:  To enable inference, re-run without bootstrap(0) (default is 200 reps),}"
-        di as txt "{it:  or call: trop_bootstrap, nreps(200)}"
-    }
-
-    // --- Survey diagnostics display (P2) ------------------------------------
-    if `_has_survey_design' & `bootstrap' > 0 {
-        // Weight DEFF diagnostic
-        capture confirm scalar e(deff_weights)
-        if !_rc & !missing(e(deff_weights)) {
-            if e(deff_weights) > 2 {
-                di as txt _n "{it:Note: Weights design effect = " as res %5.2f e(deff_weights) as txt " > 2, indicating substantial efficiency loss from unequal weighting.}"
-            }
+        // Nuisance parameter note
+        if "`method'" == "twostep" {
+            di as txt "  {it:Note: e(alpha)/e(beta) are averages across treated obs.}"
         }
-        // High-FPC diagnostic
-        capture confirm scalar e(n_high_fpc)
-        if !_rc & !missing(e(n_high_fpc)) {
-            if e(n_high_fpc) > 0 {
+        // Survey diagnostics
+        if `_has_survey_design' & `bootstrap' > 0 {
+            capture confirm scalar e(deff_weights)
+            if !_rc & !missing(e(deff_weights)) & e(deff_weights) > 2 {
+                di as txt "  {it:Weight DEFF = " as res %5.2f e(deff_weights) as txt " > 2}"
+            }
+            capture confirm scalar e(n_high_fpc)
+            if !_rc & !missing(e(n_high_fpc)) & e(n_high_fpc) > 0 {
                 capture confirm scalar e(max_fh)
                 if !_rc & !missing(e(max_fh)) {
-                    di as txt "{it:Note: " as res e(n_high_fpc) as txt " stratum/strata have sampling fraction f_h > 0.5 (max f_h = " as res %5.3f e(max_fh) as txt ").}"
-                    di as txt "{it:       FPC correction is active and significantly reduces variance.}"
+                    di as txt "  {it:FPC active: " as res e(n_high_fpc) as txt " strata with f_h > 0.5}"
                 }
             }
         }

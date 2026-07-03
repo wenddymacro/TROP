@@ -29,7 +29,7 @@ program define trop_estat_loocv
     // --- Header ---
     di as txt ""
     di as txt "LOOCV Diagnostics"
-    di as txt "{hline 61}"
+    di as txt "{hline 78}"
     
     // --- Selected regularization parameters ---
     di as txt "Selected hyperparameters:"
@@ -349,7 +349,7 @@ program define trop_estat_loocv
         }
     }
 
-    di as txt "{hline 61}"
+    di as txt "{hline 78}"
 end
 
 /* ---------------------------------------------------------------------------
