@@ -108,20 +108,18 @@ trop_check
 
 ## 快速开始与示例
 
+```stata
+* 安装
+net install trop, from("https://raw.githubusercontent.com/gorgeousfish/TROP/main") replace
+
+* 加载示例数据
+trop_data cps_logwage
+
+* 估计
+trop y d, panelvar(id) timevar(t) method(twostep) fixedlambda(0.5 0 0.01)
+```
+
 以下所有示例使用 **CPS log-wage 数据集** — 50 个美国州 × 40 年（1979–2018）的州级对数工资数据，其中 `d` 标记最低工资上调生效的州-年观测。这是 Athey et al. (2025) 的七个基准数据集之一。
-
-首先下载数据集：
-
-```stata
-net get trop                 /* 下载数据集到当前目录 */
-use cps_logwage.dta, clear
-```
-
-或直接从 GitHub 加载：
-
-```stata
-use "https://raw.githubusercontent.com/gorgeousfish/TROP/main/data/cps_logwage.dta", clear
-```
 
 **数据集：** N = 50, T = 40, 2,000 个观测。`y` = 州级对数工资；`d` = 最低工资处理（8 个处理州-年单元格，0.4%）；`id` = 州标识；`t` = 年份。
 
@@ -130,7 +128,7 @@ use "https://raw.githubusercontent.com/gorgeousfish/TROP/main/data/cps_logwage.d
 使用论文推荐的 CPS log-wage 参数值（Athey et al. 2025 表 S.1）：
 
 ```stata
-use "https://raw.githubusercontent.com/gorgeousfish/TROP/main/data/cps_logwage.dta", clear
+trop_data cps_logwage
 trop y d, panelvar(id) timevar(t) fixedlambda(0.1 0 0.9)
 ```
 
@@ -159,7 +157,7 @@ Treatment Effect (ATT):
 ### 示例 2：LOOCV 自动选择超参数
 
 ```stata
-use "https://raw.githubusercontent.com/gorgeousfish/TROP/main/data/cps_logwage.dta", clear
+trop_data cps_logwage
 trop y d, panelvar(id) timevar(t)
 ```
 
@@ -191,7 +189,7 @@ Treatment Effect (ATT):
 ### 示例 3：Bootstrap 推断
 
 ```stata
-use "https://raw.githubusercontent.com/gorgeousfish/TROP/main/data/cps_logwage.dta", clear
+trop_data cps_logwage
 trop y d, panelvar(id) timevar(t) ///
     fixedlambda(0.1 0 0.9) bootstrap(200) seed(42)
 ```
@@ -210,7 +208,7 @@ Treatment Effect (ATT):
 ### 示例 4：Joint 方法
 
 ```stata
-use "https://raw.githubusercontent.com/gorgeousfish/TROP/main/data/cps_logwage.dta", clear
+trop_data cps_logwage
 trop y d, panelvar(id) timevar(t) ///
     method(joint) fixedlambda(0.1 0 0.9)
 ```
@@ -228,7 +226,7 @@ Global intercept:
 ### 示例 5：后估计工作流
 
 ```stata
-use "https://raw.githubusercontent.com/gorgeousfish/TROP/main/data/cps_logwage.dta", clear
+trop_data cps_logwage
 trop y d, panelvar(id) timevar(t) fixedlambda(0.1 0 0.9)
 
 * 预测反事实结果和处理效应
@@ -264,7 +262,7 @@ Treatment structure:
 若需查看 LOOCV 诊断，请不使用 `fixedlambda()` 运行：
 
 ```stata
-use "https://raw.githubusercontent.com/gorgeousfish/TROP/main/data/cps_logwage.dta", clear
+trop_data cps_logwage
 trop y d, panelvar(id) timevar(t)
 estat loocv
 ```
@@ -272,7 +270,7 @@ estat loocv
 ### 示例 6：独立 Bootstrap（后估计）
 
 ```stata
-use "https://raw.githubusercontent.com/gorgeousfish/TROP/main/data/cps_logwage.dta", clear
+trop_data cps_logwage
 
 * 先估计不含 bootstrap（更快的迭代）
 trop y d, panelvar(id) timevar(t) fixedlambda(0.1 0 0.9)
@@ -302,7 +300,7 @@ Valid reps:            200
 对于大面板，使用 Penn World Tables 民主化数据集：
 
 ```stata
-use "https://raw.githubusercontent.com/gorgeousfish/TROP/main/data/pwt_loggdp.dta", clear
+trop_data pwt_loggdp
 
 * 论文的 PWT 超参数。大面板配合极小 lambda_nn
 * 可能需要大量迭代；使用 maxiter(1000) 以确保更紧的收敛。
@@ -333,7 +331,7 @@ Treatment Effect (ATT):
 
 > **收敛说明。** 当 `lambda_nn` 极小（如 0.006）时，低秩因子矩阵 L 可能有许多非零奇异值，交替最小化在大面板上收敛较慢。严格的 `tol(1e-6)` 默认值可能无法在 `maxiter(1000)` 内达到；但点估计在小数点后三位已经稳定。为获得更快的完全收敛估计，可以 (i) 增大 `lambda_nn`（如 `fixedlambda(0.4 0.3 0.1)` 约 110 次迭代收敛，τ = -0.006672）或 (ii) 放宽容差 `tol(1e-4)`。ATT 与发布的数值基准的差异 `|Δτ| < 4e-7`。
 
-**可用数据集**（通过 `net get trop` 下载）：
+**可用数据集**（通过 `trop_data` 加载）：
 
 | 文件 | 描述 | N | T |
 |------|------|---|---|
@@ -392,7 +390,7 @@ trop_bootstrap, nreps(1000) seed(42)
 交互式 Jupyter Notebook 教程作为辅助材料包含在内：
 
 ```stata
-net get trop
+trop_data 10_trop_stata, type(notebook)
 ```
 
 下载的 `10_trop_stata.ipynb` 文件涵盖数据生成、两种方法的估计、所有 `estat` 诊断、预测及真实数据 CPS 示例。

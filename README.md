@@ -108,20 +108,18 @@ trop_check
 
 ## Quick Start with Examples
 
+```stata
+* Install
+net install trop, from("https://raw.githubusercontent.com/gorgeousfish/TROP/main") replace
+
+* Load example data
+trop_data cps_logwage
+
+* Estimate
+trop y d, panelvar(id) timevar(t) method(twostep) fixedlambda(0.5 0 0.01)
+```
+
 All examples below use the **CPS log-wage dataset** — 50 US states × 40 years (1979–2018) of state-level log wages, where `d` flags state-years in which a minimum wage increase was in effect. This is one of the seven benchmark datasets from Athey et al. (2025).
-
-Download the dataset first:
-
-```stata
-net get trop                 /* downloads datasets to the current directory */
-use cps_logwage.dta, clear
-```
-
-Or load directly from GitHub:
-
-```stata
-use "https://raw.githubusercontent.com/gorgeousfish/TROP/main/data/cps_logwage.dta", clear
-```
 
 **Dataset:** N = 50, T = 40, 2,000 observations. `y` = log state-level wage; `d` = minimum wage treatment (8 treated state-year cells, 0.4%); `id` = state identifier; `t` = year.
 
@@ -130,7 +128,7 @@ use "https://raw.githubusercontent.com/gorgeousfish/TROP/main/data/cps_logwage.d
 Using the paper's recommended values for CPS log-wage (Table S.1 of Athey et al. 2025):
 
 ```stata
-use "https://raw.githubusercontent.com/gorgeousfish/TROP/main/data/cps_logwage.dta", clear
+trop_data cps_logwage
 trop y d, panelvar(id) timevar(t) fixedlambda(0.1 0 0.9)
 ```
 
@@ -159,7 +157,7 @@ Treatment Effect (ATT):
 ### Example 2: LOOCV-Selected Hyperparameters
 
 ```stata
-use "https://raw.githubusercontent.com/gorgeousfish/TROP/main/data/cps_logwage.dta", clear
+trop_data cps_logwage
 trop y d, panelvar(id) timevar(t)
 ```
 
@@ -193,7 +191,7 @@ not needed.
 ### Example 3: Bootstrap Inference
 
 ```stata
-use "https://raw.githubusercontent.com/gorgeousfish/TROP/main/data/cps_logwage.dta", clear
+trop_data cps_logwage
 trop y d, panelvar(id) timevar(t) ///
     fixedlambda(0.1 0 0.9) bootstrap(200) seed(42)
 ```
@@ -212,7 +210,7 @@ Treatment Effect (ATT):
 ### Example 4: Joint Method
 
 ```stata
-use "https://raw.githubusercontent.com/gorgeousfish/TROP/main/data/cps_logwage.dta", clear
+trop_data cps_logwage
 trop y d, panelvar(id) timevar(t) ///
     method(joint) fixedlambda(0.1 0 0.9)
 ```
@@ -230,7 +228,7 @@ Global intercept:
 ### Example 5: Post-Estimation Workflow
 
 ```stata
-use "https://raw.githubusercontent.com/gorgeousfish/TROP/main/data/cps_logwage.dta", clear
+trop_data cps_logwage
 trop y d, panelvar(id) timevar(t) fixedlambda(0.1 0 0.9)
 
 * Predict counterfactual outcomes and treatment effects
@@ -266,7 +264,7 @@ Treatment structure:
 To also inspect LOOCV diagnostics, run without `fixedlambda()`:
 
 ```stata
-use "https://raw.githubusercontent.com/gorgeousfish/TROP/main/data/cps_logwage.dta", clear
+trop_data cps_logwage
 trop y d, panelvar(id) timevar(t)
 estat loocv
 ```
@@ -274,7 +272,7 @@ estat loocv
 ### Example 6: Standalone Bootstrap (Post-Estimation)
 
 ```stata
-use "https://raw.githubusercontent.com/gorgeousfish/TROP/main/data/cps_logwage.dta", clear
+trop_data cps_logwage
 
 * Estimate without bootstrap first (faster iteration)
 trop y d, panelvar(id) timevar(t) fixedlambda(0.1 0 0.9)
@@ -304,7 +302,7 @@ Valid reps:            200
 For a large panel, use the Penn World Tables democracy dataset:
 
 ```stata
-use "https://raw.githubusercontent.com/gorgeousfish/TROP/main/data/pwt_loggdp.dta", clear
+trop_data pwt_loggdp
 
 * Paper's hyperparameters for PWT. Large panels with very small lambda_nn
 * may require many iterations; use maxiter(1000) for tighter convergence.
@@ -342,7 +340,7 @@ Treatment Effect (ATT):
 > about 110 iterations to τ = -0.006672) or (ii) relax the tolerance via
 > `tol(1e-4)`. The ATT is stable to `|Δτ| < 4e-7` against the released numerical baseline.
 
-**Available datasets** (download via `net get trop`):
+**Available datasets** (load via `trop_data`):
 
 | File | Description | N | T |
 |------|-------------|---|---|
@@ -398,13 +396,13 @@ trop_bootstrap, nreps(1000) seed(42)
 
 ## Tutorial
 
-An interactive Jupyter notebook tutorial is included as ancillary material:
+An interactive Jupyter notebook tutorial is included as ancillary material. After installation, copy the tutorial notebook to your working directory:
 
 ```stata
-net get trop
+trop_data 10_trop_stata, type(ancillary)
 ```
 
-The downloaded file `10_trop_stata.ipynb` covers data generation, estimation with both methods, all `estat` diagnostics, prediction, and a real-data CPS example.
+The file `10_trop_stata.ipynb` covers data generation, estimation with both methods, all `estat` diagnostics, prediction, and a real-data CPS example.
 
 ## Commands
 
