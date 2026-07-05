@@ -251,10 +251,7 @@ program define trop, eclass
         markout `touse' `weight_var'
     }
 
-    // --- Header -----------------------------------------------------------
-    di as txt _n "{hline 78}"
-    di as txt "Triply Robust Panel Estimator (TROP)"
-    di as txt "{hline 78}"
+    // --- Header (display deferred to post-estimation table) -----------------
 
     // --- Load auxiliary ado-files -----------------------------------------
     // Each helper is loaded on demand: first from the PLUS sysdir, then the

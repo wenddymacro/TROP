@@ -143,14 +143,7 @@ real scalar trop_main(
     n_treated = sum(d_vec :!= 0)
     if (n_treated < 1) n_treated = 1
     
-    if (verbose) {
-        printf("{txt}\n")
-        printf("{txt}TROP Estimation\n")
-        printf("{txt}====================================\n")
-        printf("{txt}Method: %s\n", method)
-        printf("{txt}Data dimensions: N=%g units, T=%g periods\n", n_units, n_periods)
-        printf("{txt}Treated observations: %g\n", n_treated)
-    }
+    // (verbose header removed: output now handled by trop.ado table)
     
     // Transfer the N x T outcome and treatment matrices to the plugin
     trop_prepare_data(depvar, treatvar, panel_idx_var, time_idx_var, 
@@ -304,25 +297,7 @@ real scalar trop_main(
         max_iter_eff, tol_eff, seed, boot_reps, alpha_eff, verbose
     )
     
-    if (verbose) {
-        if (do_loocv) {
-            real scalar _total_grid_pts
-            _total_grid_pts = cols(lambda_time_grid) * cols(lambda_unit_grid) * cols(lambda_nn_grid)
-            printf("{txt}LOOCV: enabled (%g x %g x %g = %g grid points)\n",
-                   cols(lambda_time_grid), cols(lambda_unit_grid),
-                   cols(lambda_nn_grid), _total_grid_pts)
-        }
-        else printf("{txt}LOOCV: disabled\n")
-        if (do_bootstrap) printf("{txt}Bootstrap: enabled")
-        else printf("{txt}Bootstrap: disabled")
-        if (do_bootstrap) printf(" (B=%g)", boot_reps)
-        printf("\n")
-    }
-    
     // Invoke the compiled plugin
-    if (verbose) {
-        printf("{txt}\nCalling plugin...\n")
-    }
     
     if (have_ddof) rc = _trop_main(method, do_loocv, do_bootstrap, boot_reps, ddof_eff)
     else           rc = _trop_main(method, do_loocv, do_bootstrap, boot_reps)
@@ -332,112 +307,7 @@ real scalar trop_main(
         return(rc)
     }
     
-    // Display estimation summary
-    if (verbose) {
-        _trop_display_summary(method)
-    }
-    
     return(0)
-}
-
-/*------------------------------------------------------------------------------
-  _trop_display_summary()
-
-  Print a summary table of estimation results.  Reads from temporary Stata
-  scalars (__trop_*) populated by the plugin, before ereturn post.
-
-  Inference uses the t(N_1 - 1) distribution when at least two treated
-  units are available, falling back to the standard normal otherwise.
-  N_1 is the cluster count for the stratified bootstrap (Algorithm 3).
-------------------------------------------------------------------------------*/
-
-void _trop_display_summary(string scalar method)
-{
-    real scalar att, se, ci_lower, ci_upper, pvalue, tstat
-    real scalar lambda_time, lambda_unit, lambda_nn
-    real scalar n_units, n_periods, converged
-    real scalar alpha_level, n_treated_units, df_pvalue
-    real scalar level_pct
-    
-    // ATT = (1/sum W) * sum W_{it} * tau_{it}
-    att = _trop_safe_read_scalar("__trop_att")
-    se = _trop_safe_read_scalar("__trop_se")
-    
-    // Resolve significance level from available sources
-    alpha_level = _trop_safe_read_scalar("__trop_bs_alpha")
-    if (alpha_level >= . | alpha_level <= 0 | alpha_level >= 1) {
-        alpha_level = _trop_safe_read_scalar("__trop_alpha_level")
-    }
-    if (alpha_level >= . | alpha_level <= 0 | alpha_level >= 1) {
-        alpha_level = 0.05
-    }
-    level_pct = 100 * (1 - alpha_level)
-    
-    // Compute t-statistic, p-value, and confidence interval.
-    // Reference distribution: t(N_1 - 1) when at least 2 treated units
-    // are available (Algorithm 3 resamples units, so N_1 is the cluster
-    // count); normal approximation otherwise.
-    n_treated_units = _trop_safe_read_scalar("__trop_n_treated_units")
-    if (se > 0 && se < .) {
-        tstat = att / se
-        if (n_treated_units < . && n_treated_units >= 2) {
-            df_pvalue = max((1, n_treated_units - 1))
-            pvalue = 2 * ttail(df_pvalue, abs(tstat))
-            ci_lower = att - invttail(df_pvalue, alpha_level / 2) * se
-            ci_upper = att + invttail(df_pvalue, alpha_level / 2) * se
-        }
-        else {
-            pvalue = 2 * normal(-abs(tstat))
-            ci_lower = att - invnormal(1 - alpha_level / 2) * se
-            ci_upper = att + invnormal(1 - alpha_level / 2) * se
-        }
-    }
-    else {
-        tstat = .
-        pvalue = .
-        ci_lower = .
-        ci_upper = .
-    }
-    
-    // Selected regularization parameters (lambda_time, lambda_unit, lambda_nn)
-    lambda_time = _trop_safe_read_scalar("__trop_lambda_time")
-    lambda_unit = _trop_safe_read_scalar("__trop_lambda_unit")
-    lambda_nn = _trop_safe_read_scalar("__trop_lambda_nn")
-    
-    // Panel dimensions and convergence indicator
-    n_units = _trop_safe_read_scalar("__trop_n_units")
-    n_periods = _trop_safe_read_scalar("__trop_n_periods")
-    converged = _trop_safe_read_scalar("__trop_converged")
-    if (converged >= .) converged = 0
-    
-    printf("{txt}\n")
-    printf("{txt}TROP Estimation Results\n")
-    printf("{txt}=======================\n")
-    printf("{txt}Method: %s\n", method)
-    printf("{txt}\n")
-    printf("{txt}ATT estimate:     %12.6f\n", att)
-    printf("{txt}Std. Error:       %12.6f\n", se)
-    printf("{txt}%g%% CI:           [%9.4f, %9.4f]\n", level_pct, ci_lower, ci_upper)
-    printf("{txt}p-value:          %12.4f\n", pvalue)
-    printf("{txt}\n")
-    printf("{txt}Selected lambda:\n")
-    printf("{txt}  lambda_time:    %12.6f\n", lambda_time)
-    printf("{txt}  lambda_unit:    %12.6f\n", lambda_unit)
-    /* lambda_nn: show the internal 1e10 DID/TWFE corner sentinel as "+inf"
-       so the printed summary matches the user-facing e(lambda_nn) value.
-       _trop_lambda_nn_user_face() returns Stata missing (.) for the corner
-       case; printf's %g formatter renders "." as ".", so we branch here to
-       emit the human-readable "+inf" marker. */
-    if (_trop_lambda_nn_user_face(lambda_nn) >= .) {
-        printf("{txt}  lambda_nn:      %12s  (DID/TWFE corner)\n", "+inf")
-    }
-    else {
-        printf("{txt}  lambda_nn:      %12.6f\n", lambda_nn)
-    }
-    printf("{txt}\n")
-    printf("{txt}Sample: N=%g units, T=%g periods\n", n_units, n_periods)
-    if (converged) printf("{txt}Converged: Yes\n")
-    else printf("{txt}Converged: No\n")
 }
 
 end
