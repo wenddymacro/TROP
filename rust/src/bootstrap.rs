@@ -649,7 +649,7 @@ pub fn bootstrap_trop_variance_full(
                 mut gamma_buf,
                 mut x_buf,
             ), b| {
-                let iteration_seed = seed.wrapping_add(b as u64);
+                let iteration_seed = seed.wrapping_mul(0x9E3779B97F4A7C15).wrapping_add(b as u64);
                 let sampled_units = stratified_sample(&classification, iteration_seed);
 
                 build_bootstrap_matrices_with_mask_into(
@@ -944,7 +944,7 @@ pub fn bootstrap_trop_variance_joint_full(
                 )
             },
             |(mut results, mut y_buf, mut d_buf, mut x_buf), b| {
-                let iteration_seed = seed.wrapping_add(b as u64);
+                let iteration_seed = seed.wrapping_mul(0x9E3779B97F4A7C15).wrapping_add(b as u64);
                 let sampled_units = stratified_sample(&classification, iteration_seed);
 
                 build_bootstrap_matrices_into(
@@ -1162,7 +1162,7 @@ pub fn bootstrap_trop_variance_full_weighted(
                 mut gamma_buf,
                 mut x_buf,
             ), b| {
-                let iteration_seed = seed.wrapping_add(b as u64);
+                let iteration_seed = seed.wrapping_mul(0x9E3779B97F4A7C15).wrapping_add(b as u64);
                 let sampled_units = stratified_sample(&classification, iteration_seed);
 
                 build_bootstrap_matrices_with_mask_into(
@@ -1394,7 +1394,7 @@ pub fn bootstrap_trop_variance_joint_full_weighted(
                 )
             },
             |(mut results, mut y_buf, mut d_buf, mut x_buf), b| {
-                let iteration_seed = seed.wrapping_add(b as u64);
+                let iteration_seed = seed.wrapping_mul(0x9E3779B97F4A7C15).wrapping_add(b as u64);
                 let sampled_units = stratified_sample(&classification, iteration_seed);
 
                 build_bootstrap_matrices_into(
@@ -1816,7 +1816,7 @@ pub fn bootstrap_trop_variance_rao_wu(
     let bootstrap_estimates: Vec<f64> = (0..n_bootstrap)
         .into_par_iter()
         .filter_map(|b| {
-            let iteration_seed = seed.wrapping_add(b as u64);
+            let iteration_seed = seed.wrapping_mul(0x9E3779B97F4A7C15).wrapping_add(b as u64);
             let mut rng = Xoshiro256PlusPlus::seed_from_u64(iteration_seed);
             let mut boot_weights = unit_weights_owned.clone();
 
@@ -2079,7 +2079,7 @@ pub fn bootstrap_trop_variance_rao_wu_joint(
     let bootstrap_estimates: Vec<f64> = (0..n_bootstrap)
         .into_par_iter()
         .filter_map(|b| {
-            let iteration_seed = seed.wrapping_add(b as u64);
+            let iteration_seed = seed.wrapping_mul(0x9E3779B97F4A7C15).wrapping_add(b as u64);
             let mut rng = Xoshiro256PlusPlus::seed_from_u64(iteration_seed);
             let mut boot_weights = unit_weights_owned.clone();
 
@@ -2754,7 +2754,7 @@ mod tests {
         let mut samples2: Vec<Vec<usize>> = Vec::new();
 
         for b in 0..n_iterations {
-            let iter_seed = base_seed.wrapping_add(b as u64);
+            let iter_seed = base_seed.wrapping_mul(0x9E3779B97F4A7C15).wrapping_add(b as u64);
             samples1.push(stratified_sample(&classification, iter_seed));
             samples2.push(stratified_sample(&classification, iter_seed));
         }
@@ -2788,11 +2788,11 @@ mod tests {
         for b in 0..n_iterations {
             samples_seed1.push(stratified_sample(
                 &classification,
-                100u64.wrapping_add(b as u64),
+                100u64.wrapping_mul(0x9E3779B97F4A7C15).wrapping_add(b as u64),
             ));
             samples_seed2.push(stratified_sample(
                 &classification,
-                200u64.wrapping_add(b as u64),
+                200u64.wrapping_mul(0x9E3779B97F4A7C15).wrapping_add(b as u64),
             ));
         }
 

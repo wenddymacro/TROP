@@ -750,10 +750,10 @@ static ST_retcode handle_loocv_twostep(void) {
     if (rc != TROP_SUCCESS) goto cleanup;
     
     /* Allocate memory (via AllocContext) */
-    ctx.y_matrix = (double *)malloc(n_units * n_periods * sizeof(double));
-    ctx.d_matrix = (double *)malloc(n_units * n_periods * sizeof(double));
-    ctx.control_mask = (unsigned char *)malloc(n_units * n_periods);
-    ctx.time_dist = (int64_t *)malloc(n_periods * n_periods * sizeof(int64_t));
+    ctx.y_matrix = (double *)malloc((size_t)n_units * (size_t)n_periods * sizeof(double));
+    ctx.d_matrix = (double *)malloc((size_t)n_units * (size_t)n_periods * sizeof(double));
+    ctx.control_mask = (unsigned char *)malloc((size_t)n_units * (size_t)n_periods);
+    ctx.time_dist = (int64_t *)malloc((size_t)n_periods * (size_t)n_periods * sizeof(int64_t));
     
     if (!ctx.y_matrix || !ctx.d_matrix || !ctx.control_mask || !ctx.time_dist) {
         TROP_LOG_ERROR("memory allocation failed");
@@ -819,7 +819,9 @@ static ST_retcode handle_loocv_twostep(void) {
             for (col = 0; col < n_covariates; col++) {
                 for (row = 0; row < n_obs; row++) {
                     if (SF_mat_el("__trop_covariates", row + 1, col + 1, &val) != 0) {
-                        val = 0.0;
+                        TROP_LOG_ERROR("failed to read covariate matrix element [%d,%d]", row + 1, col + 1);
+                        rc = TROP_ERR_COVARIATE_READ;
+                        goto cleanup;
                     }
                     if (val != val) { /* NaN check: IEEE 754 NaN != NaN */
                         SF_error("covariate matrix contains missing values (internal error)\n");
@@ -944,10 +946,10 @@ static ST_retcode handle_loocv_twostep_exhaustive(void) {
     if (rc != TROP_SUCCESS) goto cleanup;
 
     /* Allocate memory (via AllocContext) */
-    ctx.y_matrix = (double *)malloc(n_units * n_periods * sizeof(double));
-    ctx.d_matrix = (double *)malloc(n_units * n_periods * sizeof(double));
-    ctx.control_mask = (unsigned char *)malloc(n_units * n_periods);
-    ctx.time_dist = (int64_t *)malloc(n_periods * n_periods * sizeof(int64_t));
+    ctx.y_matrix = (double *)malloc((size_t)n_units * (size_t)n_periods * sizeof(double));
+    ctx.d_matrix = (double *)malloc((size_t)n_units * (size_t)n_periods * sizeof(double));
+    ctx.control_mask = (unsigned char *)malloc((size_t)n_units * (size_t)n_periods);
+    ctx.time_dist = (int64_t *)malloc((size_t)n_periods * (size_t)n_periods * sizeof(int64_t));
 
     if (!ctx.y_matrix || !ctx.d_matrix || !ctx.control_mask || !ctx.time_dist) {
         TROP_LOG_ERROR("memory allocation failed");
@@ -1013,7 +1015,9 @@ static ST_retcode handle_loocv_twostep_exhaustive(void) {
             for (col = 0; col < n_covariates; col++) {
                 for (row = 0; row < n_obs; row++) {
                     if (SF_mat_el("__trop_covariates", row + 1, col + 1, &val) != 0) {
-                        val = 0.0;
+                        TROP_LOG_ERROR("failed to read covariate matrix element [%d,%d]", row + 1, col + 1);
+                        rc = TROP_ERR_COVARIATE_READ;
+                        goto cleanup;
                     }
                     if (val != val) { /* NaN check: IEEE 754 NaN != NaN */
                         SF_error("covariate matrix contains missing values (internal error)\n");
@@ -1135,9 +1139,9 @@ static ST_retcode handle_loocv_joint(void) {
     if (rc != TROP_SUCCESS) goto cleanup;
     
     /* Allocate memory (no time_dist for joint method) */
-    y_matrix = (double *)malloc(n_units * n_periods * sizeof(double));
-    d_matrix = (double *)malloc(n_units * n_periods * sizeof(double));
-    control_mask = (unsigned char *)malloc(n_units * n_periods);
+    y_matrix = (double *)malloc((size_t)n_units * (size_t)n_periods * sizeof(double));
+    d_matrix = (double *)malloc((size_t)n_units * (size_t)n_periods * sizeof(double));
+    control_mask = (unsigned char *)malloc((size_t)n_units * (size_t)n_periods);
     
     if (!y_matrix || !d_matrix || !control_mask) {
         TROP_LOG_ERROR("memory allocation failed");
@@ -1199,7 +1203,9 @@ static ST_retcode handle_loocv_joint(void) {
             for (col = 0; col < n_covariates; col++) {
                 for (row = 0; row < n_obs; row++) {
                     if (SF_mat_el("__trop_covariates", row + 1, col + 1, &val) != 0) {
-                        val = 0.0;
+                        TROP_LOG_ERROR("failed to read covariate matrix element [%d,%d]", row + 1, col + 1);
+                        rc = TROP_ERR_COVARIATE_READ;
+                        goto cleanup;
                     }
                     if (val != val) { /* NaN check: IEEE 754 NaN != NaN */
                         SF_error("covariate matrix contains missing values (internal error)\n");
@@ -1326,9 +1332,9 @@ static ST_retcode handle_loocv_joint_exhaustive(void) {
     if (rc != TROP_SUCCESS) goto cleanup;
     
     /* Allocate memory (no time_dist for joint method) */
-    y_matrix = (double *)malloc(n_units * n_periods * sizeof(double));
-    d_matrix = (double *)malloc(n_units * n_periods * sizeof(double));
-    control_mask = (unsigned char *)malloc(n_units * n_periods);
+    y_matrix = (double *)malloc((size_t)n_units * (size_t)n_periods * sizeof(double));
+    d_matrix = (double *)malloc((size_t)n_units * (size_t)n_periods * sizeof(double));
+    control_mask = (unsigned char *)malloc((size_t)n_units * (size_t)n_periods);
     
     if (!y_matrix || !d_matrix || !control_mask) {
         TROP_LOG_ERROR("memory allocation failed");
@@ -1390,7 +1396,9 @@ static ST_retcode handle_loocv_joint_exhaustive(void) {
             for (col = 0; col < n_covariates; col++) {
                 for (row = 0; row < n_obs; row++) {
                     if (SF_mat_el("__trop_covariates", row + 1, col + 1, &val) != 0) {
-                        val = 0.0;
+                        TROP_LOG_ERROR("failed to read covariate matrix element [%d,%d]", row + 1, col + 1);
+                        rc = TROP_ERR_COVARIATE_READ;
+                        goto cleanup;
                     }
                     if (val != val) { /* NaN check: IEEE 754 NaN != NaN */
                         SF_error("covariate matrix contains missing values (internal error)\n");
@@ -1498,16 +1506,16 @@ static ST_retcode handle_estimate_twostep(void) {
     if (rc != TROP_SUCCESS) goto cleanup;
     
     /* Allocate input memory (via AllocContext) */
-    ctx.y_matrix = (double *)malloc(n_units * n_periods * sizeof(double));
-    ctx.d_matrix = (double *)malloc(n_units * n_periods * sizeof(double));
-    ctx.control_mask = (unsigned char *)malloc(n_units * n_periods);
-    ctx.time_dist = (int64_t *)malloc(n_periods * n_periods * sizeof(int64_t));
+    ctx.y_matrix = (double *)malloc((size_t)n_units * (size_t)n_periods * sizeof(double));
+    ctx.d_matrix = (double *)malloc((size_t)n_units * (size_t)n_periods * sizeof(double));
+    ctx.control_mask = (unsigned char *)malloc((size_t)n_units * (size_t)n_periods);
+    ctx.time_dist = (int64_t *)malloc((size_t)n_periods * (size_t)n_periods * sizeof(int64_t));
     
     /* Allocate output memory (max possible sizes) */
-    ctx.tau = (double *)malloc(n_units * n_periods * sizeof(double));  /* Max treated */
-    ctx.alpha = (double *)malloc(n_units * sizeof(double));
-    ctx.beta = (double *)malloc(n_periods * sizeof(double));
-    ctx.l_matrix = (double *)malloc(n_units * n_periods * sizeof(double));
+    ctx.tau = (double *)malloc((size_t)n_units * (size_t)n_periods * sizeof(double));  /* Max treated */
+    ctx.alpha = (double *)malloc((size_t)n_units * sizeof(double));
+    ctx.beta = (double *)malloc((size_t)n_periods * sizeof(double));
+    ctx.l_matrix = (double *)malloc((size_t)n_units * (size_t)n_periods * sizeof(double));
     /* Per-obs diagnostics: sized at the N*T upper bound on treated cells. */
     ctx.converged_by_obs = (int *)malloc((size_t)n_units * (size_t)n_periods * sizeof(int));
     ctx.n_iters_by_obs   = (int *)malloc((size_t)n_units * (size_t)n_periods * sizeof(int));
@@ -1586,7 +1594,9 @@ static ST_retcode handle_estimate_twostep(void) {
             for (col = 0; col < n_covariates; col++) {
                 for (row = 0; row < n_obs; row++) {
                     if (SF_mat_el("__trop_covariates", row + 1, col + 1, &val) != 0) {
-                        val = 0.0;
+                        TROP_LOG_ERROR("failed to read covariate matrix element [%d,%d]", row + 1, col + 1);
+                        rc = TROP_ERR_COVARIATE_READ;
+                        goto cleanup;
                     }
                     if (val != val) { /* NaN check: IEEE 754 NaN != NaN */
                         SF_error("covariate matrix contains missing values (internal error)\n");
@@ -1831,11 +1841,11 @@ static ST_retcode handle_estimate_joint(void) {
     if (rc != TROP_SUCCESS) goto cleanup;
     
     /* Allocate memory (no control_mask or time_dist for joint) */
-    y_matrix = (double *)malloc(n_units * n_periods * sizeof(double));
-    d_matrix = (double *)malloc(n_units * n_periods * sizeof(double));
+    y_matrix = (double *)malloc((size_t)n_units * (size_t)n_periods * sizeof(double));
+    d_matrix = (double *)malloc((size_t)n_units * (size_t)n_periods * sizeof(double));
     alpha = (double *)malloc(n_units * sizeof(double));
     beta = (double *)malloc(n_periods * sizeof(double));
-    l_matrix = (double *)malloc(n_units * n_periods * sizeof(double));
+    l_matrix = (double *)malloc((size_t)n_units * (size_t)n_periods * sizeof(double));
     /* Upper bound for treated cells: N*T; caller writes ≤ n_treated_cells. */
     tau_vec = (double *)malloc((size_t)n_units * (size_t)n_periods * sizeof(double));
     
@@ -1899,7 +1909,9 @@ static ST_retcode handle_estimate_joint(void) {
             for (col = 0; col < n_covariates; col++) {
                 for (row = 0; row < n_obs; row++) {
                     if (SF_mat_el("__trop_covariates", row + 1, col + 1, &val) != 0) {
-                        val = 0.0;
+                        TROP_LOG_ERROR("failed to read covariate matrix element [%d,%d]", row + 1, col + 1);
+                        rc = TROP_ERR_COVARIATE_READ;
+                        goto cleanup;
                     }
                     if (val != val) { /* NaN check: IEEE 754 NaN != NaN */
                         SF_error("covariate matrix contains missing values (internal error)\n");
@@ -2140,10 +2152,10 @@ static ST_retcode handle_bootstrap_twostep(void) {
     }
     
     /* Allocate memory */
-    y_matrix = (double *)malloc(n_units * n_periods * sizeof(double));
-    d_matrix = (double *)malloc(n_units * n_periods * sizeof(double));
-    control_mask = (unsigned char *)malloc(n_units * n_periods);
-    time_dist = (int64_t *)malloc(n_periods * n_periods * sizeof(int64_t));
+    y_matrix = (double *)malloc((size_t)n_units * (size_t)n_periods * sizeof(double));
+    d_matrix = (double *)malloc((size_t)n_units * (size_t)n_periods * sizeof(double));
+    control_mask = (unsigned char *)malloc((size_t)n_units * (size_t)n_periods);
+    time_dist = (int64_t *)malloc((size_t)n_periods * (size_t)n_periods * sizeof(int64_t));
     estimates = (double *)malloc(n_bootstrap * sizeof(double));
     
     if (!y_matrix || !d_matrix || !control_mask || !time_dist || !estimates) {
@@ -2217,7 +2229,9 @@ static ST_retcode handle_bootstrap_twostep(void) {
             for (col = 0; col < n_covariates; col++) {
                 for (row = 0; row < n_obs; row++) {
                     if (SF_mat_el("__trop_covariates", row + 1, col + 1, &val) != 0) {
-                        val = 0.0;
+                        TROP_LOG_ERROR("failed to read covariate matrix element [%d,%d]", row + 1, col + 1);
+                        rc = TROP_ERR_COVARIATE_READ;
+                        goto cleanup;
                     }
                     if (val != val) { /* NaN check: IEEE 754 NaN != NaN */
                         SF_error("covariate matrix contains missing values (internal error)\n");
@@ -2373,8 +2387,8 @@ static ST_retcode handle_bootstrap_joint(void) {
     }
     
     /* Allocate memory */
-    y_matrix = (double *)malloc(n_units * n_periods * sizeof(double));
-    d_matrix = (double *)malloc(n_units * n_periods * sizeof(double));
+    y_matrix = (double *)malloc((size_t)n_units * (size_t)n_periods * sizeof(double));
+    d_matrix = (double *)malloc((size_t)n_units * (size_t)n_periods * sizeof(double));
     estimates = (double *)malloc(n_bootstrap * sizeof(double));
     
     if (!y_matrix || !d_matrix || !estimates) {
@@ -2441,7 +2455,9 @@ static ST_retcode handle_bootstrap_joint(void) {
             for (col = 0; col < n_covariates; col++) {
                 for (row = 0; row < n_obs; row++) {
                     if (SF_mat_el("__trop_covariates", row + 1, col + 1, &val) != 0) {
-                        val = 0.0;
+                        TROP_LOG_ERROR("failed to read covariate matrix element [%d,%d]", row + 1, col + 1);
+                        rc = TROP_ERR_COVARIATE_READ;
+                        goto cleanup;
                     }
                     if (val != val) { /* NaN check: IEEE 754 NaN != NaN */
                         SF_error("covariate matrix contains missing values (internal error)\n");
@@ -2592,10 +2608,10 @@ static ST_retcode handle_bootstrap_rao_wu_twostep(void) {
     }
     
     /* Allocate memory for panel data */
-    y_matrix = (double *)malloc(n_units * n_periods * sizeof(double));
-    d_matrix = (double *)malloc(n_units * n_periods * sizeof(double));
-    control_mask = (unsigned char *)malloc(n_units * n_periods);
-    time_dist = (int64_t *)malloc(n_periods * n_periods * sizeof(int64_t));
+    y_matrix = (double *)malloc((size_t)n_units * (size_t)n_periods * sizeof(double));
+    d_matrix = (double *)malloc((size_t)n_units * (size_t)n_periods * sizeof(double));
+    control_mask = (unsigned char *)malloc((size_t)n_units * (size_t)n_periods);
+    time_dist = (int64_t *)malloc((size_t)n_periods * (size_t)n_periods * sizeof(int64_t));
     estimates = (double *)malloc(n_bootstrap * sizeof(double));
     
     if (!y_matrix || !d_matrix || !control_mask || !time_dist || !estimates) {
@@ -2823,8 +2839,8 @@ static ST_retcode handle_bootstrap_rao_wu_joint(void) {
     }
     
     /* Allocate memory for panel data */
-    y_matrix = (double *)malloc(n_units * n_periods * sizeof(double));
-    d_matrix = (double *)malloc(n_units * n_periods * sizeof(double));
+    y_matrix = (double *)malloc((size_t)n_units * (size_t)n_periods * sizeof(double));
+    d_matrix = (double *)malloc((size_t)n_units * (size_t)n_periods * sizeof(double));
     estimates = (double *)malloc(n_bootstrap * sizeof(double));
     
     if (!y_matrix || !d_matrix || !estimates) {
@@ -3010,9 +3026,9 @@ static ST_retcode handle_distance_matrix(void) {
     if (rc != TROP_SUCCESS) goto cleanup;
     
     /* Allocate memory */
-    y_matrix = (double *)malloc(n_units * n_periods * sizeof(double));
-    d_matrix = (double *)malloc(n_units * n_periods * sizeof(double));
-    dist_matrix = (double *)malloc(n_units * n_units * sizeof(double));
+    y_matrix = (double *)malloc((size_t)n_units * (size_t)n_periods * sizeof(double));
+    d_matrix = (double *)malloc((size_t)n_units * (size_t)n_periods * sizeof(double));
+    dist_matrix = (double *)malloc((size_t)n_units * (size_t)n_units * sizeof(double));
     
     if (!y_matrix || !d_matrix || !dist_matrix) {
         TROP_LOG_ERROR("memory allocation failed");

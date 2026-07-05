@@ -220,6 +220,10 @@ pub unsafe extern "C" fn stata_loocv_grid_search(
             return TropError::NullPointer.code();
         }
 
+        if n_periods <= 0 || n_units <= 0 {
+            return TropError::InvalidDimension.code();
+        }
+
         let np = n_periods as usize;
         let nu = n_units as usize;
 
@@ -503,6 +507,10 @@ pub unsafe extern "C" fn stata_estimate_twostep(
             return TropError::NullPointer.code();
         }
 
+        if n_periods <= 0 || n_units <= 0 {
+            return TropError::InvalidDimension.code();
+        }
+
         let np = n_periods as usize;
         let nu = n_units as usize;
 
@@ -768,6 +776,10 @@ pub unsafe extern "C" fn stata_bootstrap_trop_variance(
             || se_out.is_null()
         {
             return TropError::NullPointer.code();
+        }
+
+        if n_periods <= 0 || n_units <= 0 {
+            return TropError::InvalidDimension.code();
         }
 
         let np = n_periods as usize;
@@ -1056,6 +1068,10 @@ pub unsafe extern "C" fn stata_loocv_grid_search_joint(
             return TropError::NullPointer.code();
         }
 
+        if n_periods <= 0 || n_units <= 0 {
+            return TropError::InvalidDimension.code();
+        }
+
         let np = n_periods as usize;
         let nu = n_units as usize;
 
@@ -1174,6 +1190,10 @@ pub unsafe extern "C" fn stata_estimate_joint(
     catch_panic!({
         if y_ptr.is_null() || d_ptr.is_null() || tau_out.is_null() || mu_out.is_null() {
             return TropError::NullPointer.code();
+        }
+
+        if n_periods <= 0 || n_units <= 0 {
+            return TropError::InvalidDimension.code();
         }
 
         let np = n_periods as usize;
@@ -1378,6 +1398,10 @@ pub unsafe extern "C" fn stata_bootstrap_trop_variance_joint(
     catch_panic!({
         if y_ptr.is_null() || d_ptr.is_null() || se_out.is_null() {
             return TropError::NullPointer.code();
+        }
+
+        if n_periods <= 0 || n_units <= 0 {
+            return TropError::InvalidDimension.code();
         }
 
         let np = n_periods as usize;

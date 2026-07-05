@@ -5,7 +5,6 @@
 [![Stata 17+](https://img.shields.io/badge/Stata-17%2B-blue.svg)](https://www.stata.com/)
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](LICENSE)
 [![Version: 1.2.0](https://img.shields.io/badge/Version-1.2.0-green.svg)]()
-[![Build](https://github.com/gorgeousfish/TROP/actions/workflows/build-plugins.yml/badge.svg)](https://github.com/gorgeousfish/TROP/actions/workflows/build-plugins.yml)
 ![Platforms](https://img.shields.io/badge/platforms-macOS%20|%20Windows-blue)
 
 ![trop](image/image.png)

@@ -47,6 +47,7 @@
 #define TROP_ERR_VAR_NOT_FOUND  101
 #define TROP_ERR_MAT_NOT_FOUND  102
 #define TROP_ERR_SCALAR_FAIL    103
+#define TROP_ERR_COVARIATE_READ 104
 
 /* ============================================================================
  * Command Enumeration
