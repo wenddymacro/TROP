@@ -1,0 +1,143 @@
+name: Build TROP Plugins (Multi-Platform)
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+jobs:
+  build-plugin:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            target: aarch64-apple-darwin
+            plugin_name: trop_macos_arm64.plugin
+            cc: clang
+          - os: macos-13
+            target: x86_64-apple-darwin
+            plugin_name: trop_macos_x64.plugin
+            cc: clang
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            plugin_name: trop_linux_x64.plugin
+            cc: gcc
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            plugin_name: trop_windows_x64.plugin
+            cc: cl
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libopenblas-dev
+
+      - name: Build Rust core library (release)
+        working-directory: trop_stata/rust
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Build C plugin (macOS)
+        if: runner.os == 'macOS'
+        working-directory: trop_stata/plugin
+        run: |
+          ${{ matrix.cc }} -bundle -undefined dynamic_lookup -fPIC -O2 \
+            -DSYSTEM=3 \
+            -I. \
+            -o ${{ matrix.plugin_name }} \
+            stata_bridge.c stplugin.c \
+            ../rust/target/${{ matrix.target }}/release/libtrop_core.a \
+            -framework Accelerate -lSystem -lc -lm
+
+      - name: Build C plugin (Linux)
+        if: runner.os == 'Linux'
+        working-directory: trop_stata/plugin
+        run: |
+          ${{ matrix.cc }} -shared -fPIC -O2 \
+            -DSYSTEM=2 \
+            -I. \
+            -o ${{ matrix.plugin_name }} \
+            stata_bridge.c stplugin.c \
+            ../rust/target/${{ matrix.target }}/release/libtrop_core.a \
+            -lm -lpthread -ldl -lopenblas
+
+      - name: Build C plugin (Windows)
+        if: runner.os == 'Windows'
+        working-directory: trop_stata/plugin
+        shell: cmd
+        run: |
+          cl /LD /O2 /DSYSTEM=1 /I. ^
+            stata_bridge.c stplugin.c ^
+            /link /LIBPATH:..\rust\target\${{ matrix.target }}\release ^
+            trop_core.lib ws2_32.lib advapi32.lib userenv.lib bcrypt.lib ^
+            /OUT:${{ matrix.plugin_name }}
+
+      - name: Verify plugin artifact exists
+        shell: bash
+        working-directory: trop_stata/plugin
+        run: |
+          if [ ! -f "${{ matrix.plugin_name }}" ]; then
+            echo "ERROR: Plugin ${{ matrix.plugin_name }} not found!"
+            ls -la
+            exit 1
+          fi
+          echo "Plugin built successfully: ${{ matrix.plugin_name }}"
+          ls -la ${{ matrix.plugin_name }}
+
+      - name: Upload plugin artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.plugin_name }}
+          path: trop_stata/plugin/${{ matrix.plugin_name }}
+          if-no-files-found: error
+
+  package-release:
+    needs: build-plugin
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all plugin artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: plugins/
+
+      - name: Organize plugins into ado directory
+        run: |
+          mkdir -p release/ado
+          cp plugins/trop_macos_arm64.plugin/trop_macos_arm64.plugin release/ado/
+          cp plugins/trop_macos_x64.plugin/trop_macos_x64.plugin release/ado/
+          cp plugins/trop_linux_x64.plugin/trop_linux_x64.plugin release/ado/
+          cp plugins/trop_windows_x64.plugin/trop_windows_x64.plugin release/ado/
+          # Copy other distribution files
+          cp -r trop_stata/ado/* release/ado/
+          if [ -f trop_stata/ltrop.mlib ]; then
+            cp trop_stata/ltrop.mlib release/
+          fi
+          if [ -f trop_stata/trop.pkg ]; then
+            cp trop_stata/trop.pkg release/
+          fi
+          if [ -f trop_stata/stata.toc ]; then
+            cp trop_stata/stata.toc release/
+          fi
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            plugins/trop_macos_arm64.plugin/trop_macos_arm64.plugin
+            plugins/trop_macos_x64.plugin/trop_macos_x64.plugin
+            plugins/trop_linux_x64.plugin/trop_linux_x64.plugin
+            plugins/trop_windows_x64.plugin/trop_windows_x64.plugin
+          generate_release_notes: true
