@@ -43,12 +43,12 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libopenblas-dev
 
       - name: Build Rust core library (release)
-        working-directory: trop_stata/rust
+        working-directory: rust
         run: cargo build --release --target ${{ matrix.target }}
 
       - name: Build C plugin (macOS)
         if: runner.os == 'macOS'
-        working-directory: trop_stata/plugin
+        working-directory: plugin
         run: |
           ${{ matrix.cc }} -bundle -undefined dynamic_lookup -fPIC -O2 \
             -DSYSTEM=3 \
@@ -60,7 +60,7 @@ jobs:
 
       - name: Build C plugin (Linux)
         if: runner.os == 'Linux'
-        working-directory: trop_stata/plugin
+        working-directory: plugin
         run: |
           ${{ matrix.cc }} -shared -fPIC -O2 \
             -DSYSTEM=2 \
@@ -72,7 +72,7 @@ jobs:
 
       - name: Build C plugin (Windows)
         if: runner.os == 'Windows'
-        working-directory: trop_stata/plugin
+        working-directory: plugin
         shell: cmd
         run: |
           cl /LD /O2 /DSYSTEM=1 /I. ^
@@ -83,7 +83,7 @@ jobs:
 
       - name: Verify plugin artifact exists
         shell: bash
-        working-directory: trop_stata/plugin
+        working-directory: plugin
         run: |
           if [ ! -f "${{ matrix.plugin_name }}" ]; then
             echo "ERROR: Plugin ${{ matrix.plugin_name }} not found!"
@@ -97,7 +97,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.plugin_name }}
-          path: trop_stata/plugin/${{ matrix.plugin_name }}
+          path: plugin/${{ matrix.plugin_name }}
           if-no-files-found: error
 
   package-release:
@@ -121,15 +121,15 @@ jobs:
           cp plugins/trop_linux_x64.plugin/trop_linux_x64.plugin release/ado/
           cp plugins/trop_windows_x64.plugin/trop_windows_x64.plugin release/ado/
           # Copy other distribution files
-          cp -r trop_stata/ado/* release/ado/
-          if [ -f trop_stata/ltrop.mlib ]; then
-            cp trop_stata/ltrop.mlib release/
+          cp -r ado/* release/ado/
+          if [ -f ltrop.mlib ]; then
+            cp ltrop.mlib release/
           fi
-          if [ -f trop_stata/trop.pkg ]; then
-            cp trop_stata/trop.pkg release/
+          if [ -f trop.pkg ]; then
+            cp trop.pkg release/
           fi
-          if [ -f trop_stata/stata.toc ]; then
-            cp trop_stata/stata.toc release/
+          if [ -f stata.toc ]; then
+            cp stata.toc release/
           fi
 
       - name: Create GitHub Release
