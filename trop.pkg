@@ -71,6 +71,7 @@ d
 d === Pre-compiled Plugins ===
 f ado/trop_macos_arm64.plugin
 f ado/trop_macos_x64.plugin
+f ado/trop_linux_x64.plugin
 f ado/trop_windows_x64.plugin
 d
 d === License ===
