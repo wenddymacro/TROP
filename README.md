@@ -1146,7 +1146,3 @@ If you use this package in your research, please cite both the methodology paper
 }
 ```
 
-## See Also
-
-- Original paper by Athey, Imbens, Qu & Viviano: https://arxiv.org/abs/2508.21536
-- Related Stata packages: [`sdid`](https://github.com/Daniel-Pailanir/sdid) (Synthetic DID), [`diddesign`](https://github.com/gorgeousfish/diddesign) (Double DID)
