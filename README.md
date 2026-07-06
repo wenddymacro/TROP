@@ -136,22 +136,19 @@ Output:
 
 ```
 ------------------------------------------------------------------------------
-TROP Estimation Results
+Triply Robust Panel Estimator                   Number of obs      =    2,000
+Method: twostep                                 Number of units    =       50
+                                                Time periods       =       40
+                                                Treated obs        =        8
+                                                Bootstrap reps     =      200
 ------------------------------------------------------------------------------
-Method:            twostep
-Grid style:        default (17 grid points/cycle, coordinate descent)
-
-Panel dimensions:  N = 50, T = 40
-Observations:      2000
-Treated:           8 ( 0.4%)
-
-Fixed hyperparameters (LOOCV skipped):
-  lambda_time =   0.1000
-  lambda_unit =   0.0000
-  lambda_nn   =   0.9000
-
-Treatment Effect (ATT):
-  tau     =     0.031406
+             |      ATT       Std. err.    t     P>|t|    [95% conf. interval]
+-------------+----------------------------------------------------------------
+           d |   0.031406     0.014098      2.23  0.061    0.004771    0.056458
+------------------------------------------------------------------------------
+Lambda: time = 0.100, unit = 0.000, nn = 0.900 (fixed)
+Convergence: Yes (5 iterations)
+------------------------------------------------------------------------------
 ```
 
 ### Example 2: LOOCV-Selected Hyperparameters
@@ -161,27 +158,23 @@ trop_data cps_logwage
 trop y d, panelvar(id) timevar(t)
 ```
 
-Output:
+Output (LOOCV selects optimal hyperparameters via coordinate-descent grid search):
 
 ```
 ------------------------------------------------------------------------------
-TROP Estimation Results
+Triply Robust Panel Estimator                   Number of obs      =    2,000
+Method: twostep                                 Number of units    =       50
+                                                Time periods       =       40
+                                                Treated obs        =        8
+                                                Bootstrap reps     =      200
 ------------------------------------------------------------------------------
-Method:            twostep
-Grid style:        default (17 grid points/cycle, coordinate descent)
-
-Panel dimensions:  N = 50, T = 40
-Observations:      2000
-Treated:           8 ( 0.4%)
-
-Selected hyperparameters (via LOOCV):
-  lambda_time =   0.5000
-  lambda_unit =   5.0000
-  lambda_nn   =   1.0000
-  Q(lambda_hat) =   3.471727
-
-Treatment Effect (ATT):
-  tau     =     0.034188
+             |      ATT       Std. err.    t     P>|t|    [95% conf. interval]
+-------------+----------------------------------------------------------------
+           d |   0.034188     ...           ...   ...     ...         ...
+------------------------------------------------------------------------------
+Lambda: time = 0.500, unit = 5.000, nn = 1.000 (LOOCV, Q = 3.4717)
+Convergence: Yes (... iterations)
+------------------------------------------------------------------------------
 ```
 
 **Note:** LOOCV on N = 50, T = 40 sums over every D = 0 cell (paper Eq. 5)
@@ -199,12 +192,20 @@ trop y d, panelvar(id) timevar(t) ///
 Output:
 
 ```
-Treatment Effect (ATT):
-  tau     =     0.031406
-  SE     =     0.015716
-  t      =       1.9984
-  p-value=       0.0858
-  95% CI = [   -0.005756,     0.068568]
+------------------------------------------------------------------------------
+Triply Robust Panel Estimator                   Number of obs      =    2,000
+Method: twostep                                 Number of units    =       50
+                                                Time periods       =       40
+                                                Treated obs        =        8
+                                                Bootstrap reps     =      200
+------------------------------------------------------------------------------
+             |      ATT       Std. err.    t     P>|t|    [95% conf. interval]
+-------------+----------------------------------------------------------------
+           d |   0.031406     0.014098      2.23  0.061    0.004771    0.056458
+------------------------------------------------------------------------------
+Lambda: time = 0.100, unit = 0.000, nn = 0.900 (fixed)
+Convergence: Yes (5 iterations)
+------------------------------------------------------------------------------
 ```
 
 ### Example 4: Joint Method
@@ -218,11 +219,21 @@ trop y d, panelvar(id) timevar(t) ///
 Output:
 
 ```
-Treatment Effect (ATT):
-  tau     =     0.031406
-
-Global intercept:
-  mu     =     5.154320
+------------------------------------------------------------------------------
+Triply Robust Panel Estimator                   Number of obs      =    2,000
+Method: joint                                   Number of units    =       50
+                                                Time periods       =       40
+                                                Treated obs        =        8
+                                                Bootstrap reps     =      200
+------------------------------------------------------------------------------
+             |      ATT       Std. err.    t     P>|t|    [95% conf. interval]
+-------------+----------------------------------------------------------------
+           d |   0.031406     0.014097      2.23  0.061    0.004771    0.056458
+------------------------------------------------------------------------------
+Lambda: time = 0.100, unit = 0.000, nn = 0.900 (fixed)
+Convergence: Yes (2 iterations)
+Global intercept (mu):   5.154320
+------------------------------------------------------------------------------
 ```
 
 ### Example 5: Post-Estimation Workflow
@@ -244,9 +255,9 @@ estat factors
 `estat summarize` output:
 
 ```
------------------------------------------------------------------
+------------------------------------------------------------------------------
 Estimation sample summary
------------------------------------------------------------------
+------------------------------------------------------------------------------
   Number of observations:        2000    (balanced panel)
   Number of units (N):             50
   Number of periods (T):           40
@@ -258,7 +269,22 @@ Treatment structure:
   Treated units:                    8    ( 16.0%)
   Treated periods:                  1    (  2.5%)
   Pattern:                   multiple_treated_simultaneous
------------------------------------------------------------------
+
+Outcome variable (y):
+  Mean:          5.925
+  Std. Dev:      0.444
+  Min:           4.798
+  Max:           6.806
+  p25:           5.584
+  p75:           6.298
+
+Estimation details:
+  Method:        twostep (Algorithm 2 default)
+  Outcome var:   y
+  Treatment var: d
+  Panel var:     id
+  Time var:      t
+------------------------------------------------------------------------------
 ```
 
 To also inspect LOOCV diagnostics, run without `fixedlambda()`:
@@ -275,7 +301,7 @@ estat loocv
 trop_data cps_logwage
 
 * Estimate without bootstrap first (faster iteration)
-trop y d, panelvar(id) timevar(t) fixedlambda(0.1 0 0.9)
+trop y d, panelvar(id) timevar(t) fixedlambda(0.1 0 0.9) bootstrap(0)
 
 * Then add bootstrap inference separately
 trop_bootstrap, nreps(200) seed(42)
@@ -288,12 +314,12 @@ Output:
 TROP Bootstrap Inference Results
 ------------------------------------------------------------
 ATT estimate:       0.031406
-Bootstrap SE:       0.015716
-95% CI:       [   -0.005756,     0.068568]
-p-value:              0.0858
+Bootstrap SE:       0.014098
+95% CI:       [   -0.001929,     0.064742]
+p-value:              0.0612
 
-Bootstrap reps:        200
-Valid reps:            200
+Bootstrap reps:       200
+Valid reps:           200
 ------------------------------------------------------------
 ```
 
@@ -306,29 +332,26 @@ trop_data pwt_loggdp
 
 * Paper's hyperparameters for PWT. Large panels with very small lambda_nn
 * may require many iterations; use maxiter(1000) for tighter convergence.
-trop y d, panelvar(id) timevar(t) fixedlambda(0.4 0.3 0.006) maxiter(1000)
+trop y d, panelvar(id) timevar(t) fixedlambda(0.4 0.3 0.006) maxiter(1000) bootstrap(0)
 ```
 
 Output:
 
 ```
 ------------------------------------------------------------------------------
-TROP Estimation Results
+Triply Robust Panel Estimator                   Number of obs      =    5,328
+Method: twostep                                 Number of units    =      111
+                                                Time periods       =       48
+                                                Treated obs        =       29
 ------------------------------------------------------------------------------
-Method:            twostep
-Grid style:        default (17 grid points/cycle, coordinate descent)
-
-Panel dimensions:  N = 111, T = 48
-Observations:      5328
-Treated:           29 ( 0.5%)
-
-Fixed hyperparameters (LOOCV skipped):
-  lambda_time =   0.4000
-  lambda_unit =   0.3000
-  lambda_nn   =   0.0060
-
-Treatment Effect (ATT):
-  tau     =    -0.014818
+             |      ATT
+-------------+----------------------------------------------------------------
+           d |  -0.016024
+------------------------------------------------------------------------------
+Lambda: time = 0.400, unit = 0.300, nn = 0.006 (fixed)
+Convergence: No (1000 iterations)
+Note: SE/CI require bootstrap(); re-run with bootstrap(200).
+------------------------------------------------------------------------------
 ```
 
 > **Convergence note.** With a very small `lambda_nn` (e.g. 0.006), the low-rank
@@ -338,7 +361,8 @@ Treatment Effect (ATT):
 > stable to the third decimal place. For faster and fully-converged estimates,
 > either (i) increase `lambda_nn` (e.g. `fixedlambda(0.4 0.3 0.1)` converges in
 > about 110 iterations to τ = -0.006672) or (ii) relax the tolerance via
-> `tol(1e-4)`. The ATT is stable to `|Δτ| < 4e-7` against the released numerical baseline.
+> `tol(1e-4)`. Use `bootstrap(0)` on large panels for rapid exploratory analysis,
+> then add `trop_bootstrap` or re-run with `bootstrap(200)` for inference.
 
 **Available datasets** (load via `trop_data`):
 

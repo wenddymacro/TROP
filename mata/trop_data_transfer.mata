@@ -202,10 +202,16 @@ void trop_prepare_output_matrices(
        trop_prepare_covariates() has already set __trop_n_covariates when
        covariates are present; honour that value.  Fall back to 1 x 1 when
        no covariates so that the matrix always exists for the ADO-side
-       `capture confirm matrix __trop_gamma` check. */
+       `capture confirm matrix __trop_gamma` check.
+
+       Note: st_numscalar() returns J(0,0,.) when the scalar does not exist
+       (e.g. after trop_cleanup_temp_vars).  We must read into a matrix
+       first to avoid a conformability error assigning void to real scalar. */
     {
         real scalar _p_gamma
-        _p_gamma = st_numscalar("__trop_n_covariates")
+        real matrix _tmp_ncov
+        _tmp_ncov = st_numscalar("__trop_n_covariates")
+        _p_gamma = (rows(_tmp_ncov) > 0 ? _tmp_ncov : .)
         if (_p_gamma >= . | _p_gamma < 1) _p_gamma = 1
         st_matrix("__trop_gamma", J(1, _p_gamma, 0))
     }

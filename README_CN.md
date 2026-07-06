@@ -137,22 +137,19 @@ trop y d, panelvar(id) timevar(t) fixedlambda(0.1 0 0.9)
 
 ```
 ------------------------------------------------------------------------------
-TROP Estimation Results
+Triply Robust Panel Estimator                   Number of obs      =    2,000
+Method: twostep                                 Number of units    =       50
+                                                Time periods       =       40
+                                                Treated obs        =        8
+                                                Bootstrap reps     =      200
 ------------------------------------------------------------------------------
-Method:            twostep
-Grid style:        default (17 grid points/cycle, coordinate descent)
-
-Panel dimensions:  N = 50, T = 40
-Observations:      2000
-Treated:           8 ( 0.4%)
-
-Fixed hyperparameters (LOOCV skipped):
-  lambda_time =   0.1000
-  lambda_unit =   0.0000
-  lambda_nn   =   0.9000
-
-Treatment Effect (ATT):
-  tau     =     0.031406
+             |      ATT       Std. err.    t     P>|t|    [95% conf. interval]
+-------------+----------------------------------------------------------------
+           d |   0.031406     0.014098      2.23  0.061    0.004771    0.056458
+------------------------------------------------------------------------------
+Lambda: time = 0.100, unit = 0.000, nn = 0.900 (fixed)
+Convergence: Yes (5 iterations)
+------------------------------------------------------------------------------
 ```
 
 ### 示例 2：LOOCV 自动选择超参数
@@ -162,27 +159,23 @@ trop_data cps_logwage
 trop y d, panelvar(id) timevar(t)
 ```
 
-输出：
+输出（LOOCV 通过坐标下降网格搜索选择最优超参数）：
 
 ```
 ------------------------------------------------------------------------------
-TROP Estimation Results
+Triply Robust Panel Estimator                   Number of obs      =    2,000
+Method: twostep                                 Number of units    =       50
+                                                Time periods       =       40
+                                                Treated obs        =        8
+                                                Bootstrap reps     =      200
 ------------------------------------------------------------------------------
-Method:            twostep
-Grid style:        default (17 grid points/cycle, coordinate descent)
-
-Panel dimensions:  N = 50, T = 40
-Observations:      2000
-Treated:           8 ( 0.4%)
-
-Selected hyperparameters (via LOOCV):
-  lambda_time =   0.5000
-  lambda_unit =   5.0000
-  lambda_nn   =   1.0000
-  Q(lambda_hat) =   3.471727
-
-Treatment Effect (ATT):
-  tau     =     0.034188
+             |      ATT       Std. err.    t     P>|t|    [95% conf. interval]
+-------------+----------------------------------------------------------------
+           d |   0.034188     ...           ...   ...     ...         ...
+------------------------------------------------------------------------------
+Lambda: time = 0.500, unit = 5.000, nn = 1.000 (LOOCV, Q = 3.4717)
+Convergence: Yes (... iterations)
+------------------------------------------------------------------------------
 ```
 
 **注意：** 在 N = 50, T = 40 的面板上运行 LOOCV 需要对每个 D = 0 的单元格求和（论文公式 5），可能耗时 20–40 分钟。当不需要完整网格搜索时，请使用 `fixedlambda()`。
@@ -198,12 +191,20 @@ trop y d, panelvar(id) timevar(t) ///
 输出：
 
 ```
-Treatment Effect (ATT):
-  tau     =     0.031406
-  SE     =     0.015716
-  t      =       1.9984
-  p-value=       0.0858
-  95% CI = [   -0.005756,     0.068568]
+------------------------------------------------------------------------------
+Triply Robust Panel Estimator                   Number of obs      =    2,000
+Method: twostep                                 Number of units    =       50
+                                                Time periods       =       40
+                                                Treated obs        =        8
+                                                Bootstrap reps     =      200
+------------------------------------------------------------------------------
+             |      ATT       Std. err.    t     P>|t|    [95% conf. interval]
+-------------+----------------------------------------------------------------
+           d |   0.031406     0.014098      2.23  0.061    0.004771    0.056458
+------------------------------------------------------------------------------
+Lambda: time = 0.100, unit = 0.000, nn = 0.900 (fixed)
+Convergence: Yes (5 iterations)
+------------------------------------------------------------------------------
 ```
 
 ### 示例 4：Joint 方法
@@ -217,11 +218,21 @@ trop y d, panelvar(id) timevar(t) ///
 输出：
 
 ```
-Treatment Effect (ATT):
-  tau     =     0.031406
-
-Global intercept:
-  mu     =     5.154320
+------------------------------------------------------------------------------
+Triply Robust Panel Estimator                   Number of obs      =    2,000
+Method: joint                                   Number of units    =       50
+                                                Time periods       =       40
+                                                Treated obs        =        8
+                                                Bootstrap reps     =      200
+------------------------------------------------------------------------------
+             |      ATT       Std. err.    t     P>|t|    [95% conf. interval]
+-------------+----------------------------------------------------------------
+           d |   0.031406     0.014097      2.23  0.061    0.004771    0.056458
+------------------------------------------------------------------------------
+Lambda: time = 0.100, unit = 0.000, nn = 0.900 (fixed)
+Convergence: Yes (2 iterations)
+Global intercept (mu):   5.154320
+------------------------------------------------------------------------------
 ```
 
 ### 示例 5：后估计工作流
@@ -243,9 +254,9 @@ estat factors
 `estat summarize` 输出：
 
 ```
------------------------------------------------------------------
+------------------------------------------------------------------------------
 Estimation sample summary
------------------------------------------------------------------
+------------------------------------------------------------------------------
   Number of observations:        2000    (balanced panel)
   Number of units (N):             50
   Number of periods (T):           40
@@ -257,7 +268,22 @@ Treatment structure:
   Treated units:                    8    ( 16.0%)
   Treated periods:                  1    (  2.5%)
   Pattern:                   multiple_treated_simultaneous
------------------------------------------------------------------
+
+Outcome variable (y):
+  Mean:          5.925
+  Std. Dev:      0.444
+  Min:           4.798
+  Max:           6.806
+  p25:           5.584
+  p75:           6.298
+
+Estimation details:
+  Method:        twostep (Algorithm 2 default)
+  Outcome var:   y
+  Treatment var: d
+  Panel var:     id
+  Time var:      t
+------------------------------------------------------------------------------
 ```
 
 若需查看 LOOCV 诊断，请不使用 `fixedlambda()` 运行：
@@ -274,7 +300,7 @@ estat loocv
 trop_data cps_logwage
 
 * 先估计不含 bootstrap（更快的迭代）
-trop y d, panelvar(id) timevar(t) fixedlambda(0.1 0 0.9)
+trop y d, panelvar(id) timevar(t) fixedlambda(0.1 0 0.9) bootstrap(0)
 
 * 再单独添加 bootstrap 推断
 trop_bootstrap, nreps(200) seed(42)
@@ -287,12 +313,12 @@ trop_bootstrap, nreps(200) seed(42)
 TROP Bootstrap Inference Results
 ------------------------------------------------------------
 ATT estimate:       0.031406
-Bootstrap SE:       0.015716
-95% CI:       [   -0.005756,     0.068568]
-p-value:              0.0858
+Bootstrap SE:       0.014098
+95% CI:       [   -0.001929,     0.064742]
+p-value:              0.0612
 
-Bootstrap reps:        200
-Valid reps:            200
+Bootstrap reps:       200
+Valid reps:           200
 ------------------------------------------------------------
 ```
 
@@ -305,32 +331,29 @@ trop_data pwt_loggdp
 
 * 论文的 PWT 超参数。大面板配合极小 lambda_nn
 * 可能需要大量迭代；使用 maxiter(1000) 以确保更紧的收敛。
-trop y d, panelvar(id) timevar(t) fixedlambda(0.4 0.3 0.006) maxiter(1000)
+trop y d, panelvar(id) timevar(t) fixedlambda(0.4 0.3 0.006) maxiter(1000) bootstrap(0)
 ```
 
 输出：
 
 ```
 ------------------------------------------------------------------------------
-TROP Estimation Results
+Triply Robust Panel Estimator                   Number of obs      =    5,328
+Method: twostep                                 Number of units    =      111
+                                                Time periods       =       48
+                                                Treated obs        =       29
 ------------------------------------------------------------------------------
-Method:            twostep
-Grid style:        default (17 grid points/cycle, coordinate descent)
-
-Panel dimensions:  N = 111, T = 48
-Observations:      5328
-Treated:           29 ( 0.5%)
-
-Fixed hyperparameters (LOOCV skipped):
-  lambda_time =   0.4000
-  lambda_unit =   0.3000
-  lambda_nn   =   0.0060
-
-Treatment Effect (ATT):
-  tau     =    -0.014818
+             |      ATT
+-------------+----------------------------------------------------------------
+           d |  -0.016024
+------------------------------------------------------------------------------
+Lambda: time = 0.400, unit = 0.300, nn = 0.006 (fixed)
+Convergence: No (1000 iterations)
+Note: SE/CI require bootstrap(); re-run with bootstrap(200).
+------------------------------------------------------------------------------
 ```
 
-> **收敛说明。** 当 `lambda_nn` 极小（如 0.006）时，低秩因子矩阵 L 可能有许多非零奇异值，交替最小化在大面板上收敛较慢。严格的 `tol(1e-6)` 默认值可能无法在 `maxiter(1000)` 内达到；但点估计在小数点后三位已经稳定。为获得更快的完全收敛估计，可以 (i) 增大 `lambda_nn`（如 `fixedlambda(0.4 0.3 0.1)` 约 110 次迭代收敛，τ = -0.006672）或 (ii) 放宽容差 `tol(1e-4)`。ATT 与发布的数值基准的差异 `|Δτ| < 4e-7`。
+> **收敛说明。** 当 `lambda_nn` 极小（如 0.006）时，低秩因子矩阵 L 可能有许多非零奇异值，交替最小化在大面板上收敛较慢。严格的 `tol(1e-6)` 默认值可能无法在 `maxiter(1000)` 内达到；但点估计在小数点后三位已经稳定。为获得更快的完全收敛估计，可以 (i) 增大 `lambda_nn`（如 `fixedlambda(0.4 0.3 0.1)` 约 110 次迭代收敛，τ = -0.006672）或 (ii) 放宽容差 `tol(1e-4)`。大面板上使用 `bootstrap(0)` 进行快速探索性分析，然后通过 `trop_bootstrap` 或重新运行 `bootstrap(200)` 获取推断结果。
 
 **可用数据集**（通过 `trop_data` 加载）：
 
