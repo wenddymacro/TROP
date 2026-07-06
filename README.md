@@ -657,26 +657,13 @@ After `trop`, use `predict newvar, type` to generate predictions:
 
 ## Known Limitations
 
-### Functional Constraints
-
-| Limitation | Description | Status |
-|-----------|-------------|--------|
-| Covariate dimension | Requires p < min(N, T) where p is the number of covariates | By design |
-| Time-varying covariates | X_{it}β form not supported | Planned |
-| Staggered adoption (Joint) | `method(joint)` requires simultaneous treatment adoption | Paper constraint |
-| Staggered adoption (Twostep) | `method(twostep)` implicitly allows staggering without full theoretical guarantee | Use with caution |
-
-### Performance & Memory
-
 | Constraint | Description | Mitigation |
 |-----------|-------------|------------|
-| LOOCV complexity | Large panels (N>200, T>50) may be slow | Use `fixedlambda()` or `grid_style(default)` |
-| Bootstrap memory | B iterations require O(B·N·T) memory | Reduce `bootstrap()` count |
-| Distance matrix | O(N²) unit distance matrix storage | Keep panel size N<500 |
+| `method(joint)` requires simultaneous adoption | All treated units must enter treatment at the same period (paper Remark 6.1) | Use `method(twostep)` for staggered designs |
+| LOOCV can be slow on large panels | O(grid × N×T) evaluations | Use `fixedlambda()` for quick results; `grid_style(default)` for moderate speed |
+| Time-varying coefficient models β(t) | Not supported; current `covariates()` estimates a single shared γ | — |
 
-**Not yet supported:** Time-varying coefficient models β(t) and switching-treatment patterns under `method(joint)`.
-
-For advanced topics (methodology details, architecture, troubleshooting, performance tuning), see [Advanced Guide](docs/advanced.md).
+For advanced topics (methodology, architecture, troubleshooting, performance tuning), see [Advanced Guide](docs/advanced.md).
 
 ## References
 
