@@ -412,6 +412,18 @@ void trop_store_results(string scalar method)
         st_numscalar("e(loocv_rmse)", sqrt(loocv_score / loocv_n_valid))
     }
 
+    /* ── raw LOOCV diagnostics exposed on e() ─────────────────────────
+       These are consumed directly by estat loocv and estat sensitivity. */
+    if (loocv_score < .) {
+        st_numscalar("e(loocv_score)", loocv_score)
+    }
+    if (loocv_n_valid < .) {
+        st_numscalar("e(loocv_n_valid)", loocv_n_valid)
+    }
+    if (loocv_n_attempted < .) {
+        st_numscalar("e(loocv_n_attempted)", loocv_n_attempted)
+    }
+
     /* ── LOOCV failure rate ────────────────────────────────────────────
        Fraction of grid-point evaluations that did not converge during
        the LOOCV search; mirrors e(bootstrap_fail_rate) above. */

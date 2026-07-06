@@ -479,6 +479,8 @@ Post-estimation (available after `trop`):
 - `fine` — 7 × 7 × 7 = 343 combinations, 21 evaluations per cycle (intermediate resolution)
 - `extended` — 14 × 16 × 19 = 4,256 combinations, 49 evaluations per cycle (finer search, slower; includes DID/TWFE corner)
 
+| Option | Description | Default |
+|:--|:--|:--|
 | `covariates(varlist)`        | Covariates for X'γ adjustment (paper Section 6.2 Eq. 14) | —          |
 | `twostep_loocv(string)`      | Twostep LOOCV strategy: `cycling` (default) or `exhaustive`    | `cycling`  |
 | `joint_loocv(string)`        | Joint LOOCV strategy: `cycling` or `exhaustive` (default)      | `exhaustive` |
@@ -547,6 +549,7 @@ enabled, so downstream code can switch `cimethod()` without re-estimating.
 | `e(lambda_time)` | Selected lambda_time                          |
 | `e(lambda_unit)` | Selected lambda_unit                          |
 | `e(lambda_nn)`   | Selected lambda_nn                            |
+| `e(stage1_lambda_nn)` | Stage-1 nuclear norm penalty (joint cycling) |
 | `e(loocv_score)` | Optimal LOOCV score Q(lambda_hat)             |
 
 *Sample information:*
@@ -582,6 +585,8 @@ enabled, so downstream code can switch `cimethod()` without re-estimating.
 | `e(loocv_n_attempted)`     | Number of attempted LOOCV evaluations (= every D=0 cell, paper Eq. 5) |
 | `e(loocv_fail_rate)`       | LOOCV failure rate                      |
 | `e(loocv_used)`            | Whether LOOCV was performed (1/0)       |
+| `e(loocv_first_failed_t)`  | Time index of first LOOCV failure       |
+| `e(loocv_first_failed_i)`  | Unit index of first LOOCV failure       |
 | `e(seed)`                  | RNG seed used                           |
 
 *Grid information:*
@@ -676,7 +681,7 @@ enabled, so downstream code can switch `cimethod()` without re-estimating.
 | `estat bootstrap`   | `boot`       | Bootstrap distribution diagnostics         |
 | `estat loocv`       |              | LOOCV hyperparameter selection diagnostics |
 | `estat factors`     |              | Factor matrix (L) SVD analysis             |
-| `estat triplerob`   | `trip`       | Theorem 5.1 triple-robustness bias bound decomposition (`\|Δᵘ\|₂ · \|Δᵗ\|₂ · \|B\|_*`) |
+| `estat triplerob`   | `trip`       | Theorem 5.1 triple-robustness bias bound decomposition (`‖Δᵘ‖₂ · ‖Δᵗ‖₂ · ‖B‖_*`) |
 | `estat distance`    | `dist`       | Unit distance distribution diagnostics     |
 | `estat mht`         |              | Multiple hypothesis testing correction     |
 | `estat eventstudy`  | `es`         | Event-study dynamic treatment effects      |

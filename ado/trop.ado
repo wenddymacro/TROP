@@ -29,7 +29,7 @@
     Syntax
     ------
     trop depvar treatvar [if] [in], panelvar(varname) timevar(varname)
-        [method(twostep|joint|local|global) grid_style(default|extended)
+        [method(twostep|joint|local|global) grid_style(default|fine|extended)
          twostep_loocv(cycling|exhaustive) joint_loocv(cycling|exhaustive)
          lambda_time_grid(numlist) lambda_unit_grid(numlist)
          lambda_nn_grid(numlist) fixedlambda(numlist)

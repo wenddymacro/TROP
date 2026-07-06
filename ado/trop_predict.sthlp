@@ -35,6 +35,9 @@
 {synopt:{opt alpha}}unit fixed effects{p_end}
 {synopt:{opt beta}}time fixed effects{p_end}
 {synopt:{opt xb}}linear prediction (alias for {opt y0}){p_end}
+{synopt:{opt fitted}}fitted values Y_hat = Y(0) + tau * W{p_end}
+{synopt:{opt att}}treatment effect (alias for {opt te}){p_end}
+{synopt:{opt counterfactual}}counterfactual Y(0) (alias for {opt y0}){p_end}
 {synoptline}
 {p2colreset}{...}
 
