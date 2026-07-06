@@ -400,18 +400,18 @@ program define trop, eclass
 
     if `_verbose_level' >= 3 {
         capture noisily trop_validate `depvar' `treatvar' if `touse', ///
-            panelvar(`panelvar') timevar(`timevar')
+            panelvar(`panelvar') timevar(`timevar') method(`method')
     }
     else {
         capture trop_validate `depvar' `treatvar' if `touse', ///
-            panelvar(`panelvar') timevar(`timevar')
+            panelvar(`panelvar') timevar(`timevar') method(`method')
     }
 
     if _rc != 0 {
         if `_verbose_level' < 3 {
             // Re-run with output so the user can see what failed
             noisily trop_validate `depvar' `treatvar' if `touse', ///
-                panelvar(`panelvar') timevar(`timevar')
+                panelvar(`panelvar') timevar(`timevar') method(`method')
         }
         di as error _n "Data validation failed."
         exit _rc
@@ -460,17 +460,23 @@ program define trop, eclass
     // The joint method solves a single weighted least-squares problem for a
     // scalar tau, which requires all treated units to share the same adoption
     // period.  Staggered adoption violates this assumption.
-    if "`method'" == "joint" & "`treatment_pattern'" == "staggered_adoption" {
+    if "`method'" == "joint" & inlist("`treatment_pattern'", "staggered_adoption", "switching_treatment") {
         di as error _n "{bf:ERROR: method('joint') requires simultaneous treatment adoption}"
-        di as error "Your data shows staggered adoption (units first treated at different periods)."
+        if "`treatment_pattern'" == "switching_treatment" {
+            di as error "Your data shows switching treatment (units turn treatment on and off)."
+        }
+        else {
+            di as error "Your data shows staggered adoption (units first treated at different periods)."
+        }
         di as error ""
         di as error "The joint method estimates a single scalar tau with shared weights,"
-        di as error "which assumes all treated units begin treatment at the same period."
-        di as error "Staggered adoption violates this assumption and would produce"
+        di as error "which assumes all treated units begin treatment at the same period"
+        di as error "and remain treated afterwards (absorbing state)."
+        di as error "This treatment pattern violates that assumption and would produce"
         di as error "incorrect results."
         di as error ""
         di as error "Solution: Use method('twostep') which estimates individual treatment"
-        di as error "effects per (unit, period) pair and properly handles staggered designs."
+        di as error "effects per (unit, period) pair and supports arbitrary 0/1 designs."
         di as error ""
         di as error "  trop `depvar' `treatvar', panelvar(`panelvar') timevar(`timevar') method(twostep)"
         exit 459

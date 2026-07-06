@@ -28,7 +28,8 @@ program define trop_validate, eclass
         [NOTIMeindex] ///       // skip time-index generation
         [COVariates(varlist)] ///  // covariates for balance diagnostics
         [MCP] ///               // enable extended consistency checks
-        [STATEmcp]              // alias for mcp
+        [STATEmcp] ///          // alias for mcp
+        [METHod(string)]        // estimation method (joint enforces absorbing state)
     
     // Clean up variables that may persist from a previous call
     _trop_cleanup_vars
@@ -349,12 +350,16 @@ program define trop_validate, eclass
     
     // Sub-step 3b: Verify absorbing state — treatment must be non-decreasing
     // Once treated, a unit remains treated (no treatment reversal).
+    // NOTE: This constraint is only required by method(joint), whose single
+    // scalar-tau WLS assumes an absorbing (non-decreasing) treatment path.
+    // The twostep method (and the Rust core) support arbitrary 0/1 treatment
+    // matrices, including switching treatment, so it is not enforced there.
     tempvar _W_decrease _has_decrease
     qui by `panelvar': gen byte `_W_decrease' = (`treatvar'[_n-1] == 1 & `treatvar' == 0) ///
         if _n > 1 & `touse'
     qui bysort `panelvar': egen byte `_has_decrease' = max(`_W_decrease') if `touse'
     qui sum `_has_decrease' if `touse', meanonly
-    if r(max) == 1 {
+    if r(max) == 1 & "`method'" == "joint" {
         // List offending units
         di as result " done"
         di ""

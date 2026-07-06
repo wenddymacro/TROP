@@ -150,14 +150,17 @@ rejected with r(198).
 {opt twostep} (default) uses per-observation weights following Algorithm 2.
 This allows for heterogeneous treatment effects and is the recommended
 approach.  Use this when treatment effects may vary across units, across
-post-treatment periods, or both.
+post-treatment periods, or both.  {opt twostep} supports arbitrary 0/1
+treatment matrices, including staggered adoption and switching treatments
+(units turning treatment on and off).
 
 {pmore}
 {opt joint} uses global weights following Remark 6.1. This assumes
 homogeneous treatment effects but provides higher precision when the
 assumption holds.  Because the same weight system is shared across treated
-cells, {opt joint} is intended for simultaneous-adoption designs rather
-than arbitrarily staggered treated blocks.
+cells, {opt joint} requires a simultaneous-adoption, absorbing design and
+rejects staggered adoption and switching treatments with r(459); use
+{opt twostep} for those patterns.
 
 {dlgtab:Lambda Grid Settings}
 
