@@ -5,7 +5,7 @@
 [![Stata 17+](https://img.shields.io/badge/Stata-17%2B-blue.svg)](https://www.stata.com/)
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](LICENSE)
 [![Version: 1.2.0](https://img.shields.io/badge/Version-1.2.0-green.svg)]()
-![Platforms](https://img.shields.io/badge/platforms-macOS%20|%20Windows-blue)
+![Platforms](https://img.shields.io/badge/platforms-macOS%20|%20Linux%20|%20Windows-blue)
 
 ![trop](image/image.png)
 
@@ -78,6 +78,7 @@ The TROP framework nests existing estimators:
 | macOS Apple Silicon (ARM64) | `trop_macos_arm64.plugin` | ✅ Precompiled |
 | macOS Intel (x86-64) | `trop_macos_x64.plugin` | ✅ Precompiled |
 | Windows x86-64 | `trop_windows_x64.plugin` | ✅ Precompiled |
+| Linux x86-64 | `trop_linux_x64.plugin` | ✅ Precompiled |
 
 ### Option A: Install from GitHub (recommended)
 

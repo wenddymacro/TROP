@@ -6,7 +6,7 @@
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](LICENSE)
 [![Version: 1.2.0](https://img.shields.io/badge/Version-1.2.0-green.svg)]()
 [![Build](https://github.com/gorgeousfish/TROP/actions/workflows/build-plugins.yml/badge.svg)](https://github.com/gorgeousfish/TROP/actions/workflows/build-plugins.yml)
-![Platforms](https://img.shields.io/badge/platforms-macOS%20|%20Windows-blue)
+![Platforms](https://img.shields.io/badge/platforms-macOS%20|%20Linux%20|%20Windows-blue)
 
 ![trop](image/image.png)
 
@@ -77,6 +77,7 @@ TROP 框架嵌套了现有估计量：
 | macOS Apple Silicon (ARM64) | `trop_macos_arm64.plugin` | ✅ 预编译 |
 | macOS Intel (x86-64) | `trop_macos_x64.plugin` | ✅ 预编译 |
 | Windows x86-64 | `trop_windows_x64.plugin` | ✅ 预编译 |
+| Linux x86-64 | `trop_linux_x64.plugin` | ✅ 预编译 |
 
 ## 安装
 
