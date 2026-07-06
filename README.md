@@ -35,7 +35,7 @@ In semi-synthetic simulations calibrated to seven real datasets (Table 1 of the 
 - **Bootstrap Inference** — Stratified unit block bootstrap for variance estimation and confidence intervals (Algorithm 3)
 - **General Assignment Patterns** — Handles staggered adoption, switching treatments, and arbitrary binary treatment matrices
 - **Post-Estimation Diagnostics** — 13 `estat` subcommands (including triple-robustness bias decomposition, event-study, pre-trend test, and table export) and 11 `predict` types for comprehensive analysis
-- **Covariate Adjustment** — Time-invariant covariates X_i'γ (paper Section 6.2 Eq. 14) with automatic WLS projection
+- **Covariate Adjustment** — Covariates X_{j,s}'γ (paper Section 6.2 Eq. 14) with automatic WLS projection
 - **Survey Design Support** — Stratification, PSU clustering, and FPC via Rao-Wu rescaled bootstrap
 - **High-Performance Backend** — Core computation in Rust via compiled plugin; no external dependencies
 
@@ -479,7 +479,7 @@ Post-estimation (available after `trop`):
 - `fine` — 7 × 7 × 7 = 343 combinations, 21 evaluations per cycle (intermediate resolution)
 - `extended` — 14 × 16 × 19 = 4,256 combinations, 49 evaluations per cycle (finer search, slower; includes DID/TWFE corner)
 
-| `covariates(varlist)`        | Time-invariant covariates for X_i'γ adjustment (paper Section 6.2 Eq. 14) | —          |
+| `covariates(varlist)`        | Covariates for X'γ adjustment (paper Section 6.2 Eq. 14) | —          |
 | `twostep_loocv(string)`      | Twostep LOOCV strategy: `cycling` (default) or `exhaustive`    | `cycling`  |
 | `joint_loocv(string)`        | Joint LOOCV strategy: `cycling` or `exhaustive` (default)      | `exhaustive` |
 | `vlevel(integer)`            | Verbosity level (0-4): 0=silent, 1=minimal, 2=detailed, 3=debug, 4=trace | `0`        |
@@ -930,12 +930,12 @@ than personal preference:
    `matrix list e(beta)`.  Pinned by
    `tests/test_alpha_beta_rownames.do`.
 
-**Out of scope (current release).** Time-varying covariates
-$X_{it}\beta$ (the current implementation supports time-invariant
-covariates $X_i'\gamma$ per paper Section 6.2 Eq. 14, but not
-full panel-varying regressors); and switching-treatment patterns
-under `method(joint)`.  These lie outside the current scope and are
-planned for a future release.
+**Out of scope (current release).** Time-varying coefficient models
+$X_{it}\beta(t)$ where the coefficient vector varies by period
+(the current implementation supports covariates $X_{j,s}'\gamma$
+per paper Section 6.2 Eq. 14 with a single shared coefficient vector);
+and switching-treatment patterns under `method(joint)`.  These lie
+outside the current scope and are planned for a future release.
 
 ## Known Limitations
 
