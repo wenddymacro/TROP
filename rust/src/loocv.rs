@@ -26,7 +26,6 @@
 //! deterministic tie-breaker (see the function documentation for details).
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use ndarray::{Array1, Array2, ArrayView2};
@@ -324,282 +323,97 @@ pub fn loocv_score_for_params(
 ) -> (f64, usize, Option<(usize, usize)>) {
     let n_periods = y.nrows();
     let n_units = y.ncols();
-    let n_obs = control_obs.len();
-    if n_obs == 0 {
-        return (f64::INFINITY, 0, None);
-    }
 
-    // ── Candidate-inner chunk parallelism (Task 32) ─────────────────────────
-    // The control-observation LOO loop is split into contiguous chunks that are
-    // evaluated on the SHARED rayon pool.  This layer composes with the
-    // candidate-level `par_iter` in the callers: rayon work-stealing balances
-    // the two automatically (many candidates ⇒ the outer layer saturates the
-    // pool and these chunks queue behind it; few candidates ⇒ these inner
-    // chunks fill the otherwise-idle cores).  There is deliberately NO
-    // `grid.len()` heuristic switch — one global pool, one policy.
-    //
-    // Chunk granularity is `n_threads * 4` (finer than one chunk per thread) so
-    // work-stealing stays balanced even when per-cell cost is heterogeneous
-    // (notably the slow λ_nn ∈ (0, 0.1) FISTA band), and so each chunk's
-    // warm-start chain is reset often enough to stay near the serial path.
-    //
-    // Warm-start-fidelity guard (data SIZE, not a grid heuristic): the parallel
-    // path splits the otherwise-single serial warm-start chain into one chain
-    // per chunk, each starting cold at its head.  On large panels the cold head
-    // is amortised over a long chain and the per-cell τ̂ match the serial chain
-    // to within convergence tolerance (bench: rel_diff 5.77e-8 at n_obs=8333).
-    // On SMALL panels a fragmented chain can converge to a materially different
-    // iterate within the `max_iter` budget, so we require at least `MIN_CHUNK`
-    // cells per chunk; when `n_obs <= MIN_CHUNK` this collapses to a SINGLE
-    // chunk == the exact serial warm chain, making the result bit-identical to
-    // the pre-parallel serial path (early stop included).  At ddcg scale
-    // (n_obs ≈ 8333, 8 threads) the floor is inactive: chunk_size = 261 == the
-    // prototype's `div_ceil(n_obs, n_threads*4)`, so the validated 6.29× path is
-    // unchanged.
-    const MIN_CHUNK: usize = 256;
-    let n_threads = rayon::current_num_threads().max(1);
-    let chunk_size = n_obs.div_ceil(n_threads * 4).max(MIN_CHUNK).min(n_obs);
+    let mut tau_sq_sum = 0.0;
+    let mut n_valid = 0usize;
 
-    // ── Cross-chunk early termination (mirrors the serial `>` short-circuit) ──
-    // `Q(λ) = Σ τ̂²` is a sum of non-negative terms, hence monotonically
-    // non-decreasing in the number of cells summed.  `shared_sum` holds the
-    // running Σ τ̂² across ALL chunks (bit-encoded f64, CAS add); once it
-    // exceeds `best_score_so_far` we set `cancel`, and every chunk bails at its
-    // next check.  This reproduces the serial early exit while spreading the
-    // work over threads.
-    //
-    // ## Correctness — numerical identity with the serial / no-prune path
-    //   * `shared_sum` and `cancel` are LOCAL to this single candidate
-    //     evaluation, so cancellation never leaks across candidates.
-    //   * The eventual argmin candidate has full Q = Q* ≤ `best_score_so_far`
-    //     (the incumbent bound is a min over a subset, hence always ≥ Q*, and
-    //     the caller adds a TIE_TOL margin on top).  Its running `shared_sum`
-    //     therefore never exceeds the bound, so it is NEVER cancelled and its Q
-    //     is summed in full.  Only strictly-worse candidates get cancelled.
-    //   * On cancellation the returned partial Σ (over the fixed chunk order)
-    //     is ≥ the value that tripped the bound — every δ counted in
-    //     `shared_sum` also lives in exactly one chunk's returned `tau_sq_sum`,
-    //     and chunks never subtract — so the returned score is still > the
-    //     bound.  The caller's `better_candidate` therefore rejects it exactly
-    //     as it rejects the serial early-exit partial, and also skips lowering
-    //     the shared bound because `n_valid < n_obs`.
-    //   * `shared_sum` feeds ONLY the cancel decision; the RETURNED score is
-    //     always the fixed-chunk-order sum of `partials`, independent of thread
-    //     completion order, so summation-order drift stays ≪ 1e-10.
-    // Hence the selected (λ*, score) — and every downstream quantity — is
-    // identical to the serial path; only the (non-deterministic) TIMING of
-    // cancellation varies across runs.
-    let shared_sum = AtomicU64::new(0.0f64.to_bits());
-    let cancel = AtomicBool::new(false);
+    // Warm start: reuse previous observation's solution as initial values
+    // for the next. Under the same lambda combination, alpha/beta (fixed
+    // effects) are similar across control observations, so this reduces
+    // the number of outer iterations needed for convergence.
+    let mut warm_alpha: Option<Array1<f64>> = None;
+    let mut warm_beta: Option<Array1<f64>> = None;
+    let mut warm_l: Option<Array2<f64>> = None;
 
-    // Each chunk mirrors the serial inner loop over its slice of `control_obs`,
-    // with a CHUNK-LOCAL warm-start chain (first cell of every chunk starts
-    // cold) and a chunk-local (T × N) weight buffer.  Warm starts only steer
-    // the convergence PATH, not the converged fixed point, so once each fit
-    // reaches `tol` the per-cell τ̂ match the serial chain to within the
-    // convergence tolerance (drift ≪ 1e-10).
-    let partials: Vec<(f64, usize, Option<(usize, usize)>)> = control_obs
-        .par_chunks(chunk_size)
-        .map(|chunk| {
-            let mut tau_sq_sum = 0.0;
-            let mut n_valid = 0usize;
-            let mut warm_alpha: Option<Array1<f64>> = None;
-            let mut warm_beta: Option<Array1<f64>> = None;
-            let mut warm_l: Option<Array2<f64>> = None;
-            let mut weight_buf = Array2::<f64>::zeros((n_periods, n_units));
+    // Reuse a single weight buffer across all control observations to avoid
+    // repeated (T × N) heap allocations inside the LOOCV hot loop.
+    let mut weight_buf = Array2::<f64>::zeros((n_periods, n_units));
 
-            for &(t, i) in chunk {
-                // Bail promptly if a sibling chunk already blew the bound or hit
-                // a failure (this candidate is a confirmed loser / +∞).
-                if cancel.load(Ordering::Relaxed) {
+    for &(t, i) in control_obs {
+        // Compute observation-specific weight matrix (using the cache so
+        // we avoid repeating the O(T) pairwise distance computation for
+        // every control observation).
+        compute_weight_matrix_cached_into(
+            &mut weight_buf,
+            y,
+            d,
+            dist_cache,
+            n_periods,
+            n_units,
+            i,
+            t,
+            lambda_time,
+            lambda_unit,
+            time_dist,
+        );
+
+        // Build warm start reference from previous successful fit.
+        let ws = match (&warm_alpha, &warm_beta, &warm_l) {
+            (Some(a), Some(b), Some(l_prev)) => Some((a, b, l_prev)),
+            _ => None,
+        };
+
+        // Estimate model excluding this observation.
+        match estimate_model(
+            y,
+            control_mask,
+            &weight_buf.view(),
+            lambda_nn,
+            n_periods,
+            n_units,
+            max_iter,
+            tol,
+            Some((t, i)),
+            ws,
+            x,
+            None,
+        ) {
+            Some((alpha, beta, l, _n_iters, _converged, gamma)) => {
+                // Pseudo-treatment effect: τ̂ = Y_{ti} − α_i − β_t − L_{ti} − X'γ.
+                let mut tau = y[[t, i]] - alpha[i] - beta[t] - l[[t, i]];
+                if let Some(x_mat) = x {
+                    if let Some(ref g) = gamma {
+                        let idx = t * n_units + i;
+                        tau -= x_mat.row(idx).dot(g);
+                    }
+                }
+                tau_sq_sum += tau * tau;
+                n_valid += 1;
+
+                // Stash solution for warm-starting the next observation.
+                warm_alpha = Some(alpha);
+                warm_beta = Some(beta);
+                warm_l = Some(l);
+
+                // Early termination: Q(λ) = Σ τ̂² is a sum of non-negative
+                // terms, so the partial sum is monotonically non-decreasing.
+                // Once it exceeds the current best score, no subsequent terms
+                // can bring it below best — safe to abandon this λ.
+                if tau_sq_sum > best_score_so_far {
                     return (tau_sq_sum, n_valid, None);
                 }
-
-                compute_weight_matrix_cached_into(
-                    &mut weight_buf,
-                    y,
-                    d,
-                    dist_cache,
-                    n_periods,
-                    n_units,
-                    i,
-                    t,
-                    lambda_time,
-                    lambda_unit,
-                    time_dist,
-                );
-
-                let ws = match (&warm_alpha, &warm_beta, &warm_l) {
-                    (Some(a), Some(b), Some(l_prev)) => Some((a, b, l_prev)),
-                    _ => None,
-                };
-
-                match estimate_model(
-                    y,
-                    control_mask,
-                    &weight_buf.view(),
-                    lambda_nn,
-                    n_periods,
-                    n_units,
-                    max_iter,
-                    tol,
-                    Some((t, i)),
-                    ws,
-                    x,
-                    None,
-                ) {
-                    Some((alpha, beta, l, _n_iters, _converged, gamma)) => {
-                        // τ̂ = Y_{ti} − α_i − β_t − L_{ti} − X'γ.
-                        let mut tau = y[[t, i]] - alpha[i] - beta[t] - l[[t, i]];
-                        if let Some(x_mat) = x {
-                            if let Some(ref g) = gamma {
-                                let idx = t * n_units + i;
-                                tau -= x_mat.row(idx).dot(g);
-                            }
-                        }
-                        let tau2 = tau * tau;
-                        tau_sq_sum += tau2;
-                        n_valid += 1;
-                        warm_alpha = Some(alpha);
-                        warm_beta = Some(beta);
-                        warm_l = Some(l);
-
-                        // Publish to the global running Σ and test the bound.
-                        let global = atomic_add_f64(&shared_sum, tau2);
-                        if global > best_score_so_far {
-                            cancel.store(true, Ordering::Relaxed);
-                            return (tau_sq_sum, n_valid, None);
-                        }
-                    }
-                    None => {
-                        // Estimation failure ⇒ whole candidate Q = +∞.  Signal
-                        // siblings to stop; the caller promotes any chunk
-                        // failure to +∞ and reports the earliest failing cell.
-                        cancel.store(true, Ordering::Relaxed);
-                        return (tau_sq_sum, n_valid, Some((t, i)));
-                    }
-                }
             }
-            (tau_sq_sum, n_valid, None)
-        })
-        .collect();
-
-    // Failure semantics preserved: any chunk failure ⇒ candidate Q = +∞,
-    // reporting the earliest failing cell (chunks are contiguous and returned
-    // in traversal order).
-    let mut n_valid_total = 0usize;
-    for &(_, nv, ff) in &partials {
-        n_valid_total += nv;
-        if let Some(cell) = ff {
-            return (f64::INFINITY, n_valid_total, Some(cell));
+            None => {
+                // Estimation failure invalidates this λ combination.
+                return (f64::INFINITY, n_valid, Some((t, i)));
+            }
         }
     }
 
-    // Fixed-order accumulation (chunk order == control-obs traversal order),
-    // independent of thread completion order.
-    let tau_sq_sum: f64 = partials.iter().map(|&(s, _, _)| s).sum();
-
-    if n_valid_total == 0 {
+    if n_valid == 0 {
         (f64::INFINITY, 0, None)
     } else {
-        (tau_sq_sum, n_valid_total, None)
-    }
-}
-
-/// Lock-free, shared best-score tracker for dynamic early-termination pruning
-/// during candidate-parallel LOOCV search (Task 27, item 2).
-///
-/// Stores an `f64` via its IEEE-754 bit pattern (`to_bits`/`from_bits`) inside
-/// an `AtomicU64`, and is updated with a compare-and-swap loop implementing
-/// `fetch_min` semantics (the stored value only ever decreases).
-///
-/// ## Correctness — numerical identity guarantee
-/// The tracked value is used **only** as an early-termination pruning bound,
-/// exposed through [`AtomicBestScore::pruning_bound`] which adds a `TIE_TOL`
-/// margin.  Concretely, a candidate is abandoned only when its *partial*
-/// `Q = Σ τ̂²` already exceeds `best + TIE_TOL`.  Because `Q` is a sum of
-/// non-negative terms, that candidate's *full* `Q` also exceeds
-/// `best + TIE_TOL`; hence `better_candidate` rejects it in BOTH the pruned and
-/// the unpruned computation — the score is strictly worse than the incumbent by
-/// more than `TIE_TOL`, so it can never tie and can never be selected.
-///
-/// Consequently:
-///   * the eventual argmin is **never** pruned (its partial sums stay ≤ its
-///     full `Q` ≤ every observed complete score, so the `> bound` test never
-///     fires), and its `Q` is therefore always computed in full;
-///   * the selected `(λ*, score)` — and every downstream quantity derived from
-///     it (`att`, `loocv_score`, …) — is identical to the snapshot / no-prune
-///     version.
-/// Only the *timing* of pruning is non-deterministic across runs, which affects
-/// performance but never the result.  `Relaxed` ordering therefore suffices:
-/// the value is a heuristic bound, not a synchronisation signal, and no other
-/// memory is published through it.
-struct AtomicBestScore(AtomicU64);
-
-impl AtomicBestScore {
-    #[inline]
-    fn new(initial: f64) -> Self {
-        AtomicBestScore(AtomicU64::new(initial.to_bits()))
-    }
-
-    /// Current best complete score observed so far.
-    #[inline]
-    fn get(&self) -> f64 {
-        f64::from_bits(self.0.load(Ordering::Relaxed))
-    }
-
-    /// Early-termination bound: best score plus a `TIE_TOL` margin.  Pruning a
-    /// candidate whose partial `Q` exceeds this bound is provably outcome-
-    /// preserving (see the type-level docs).
-    #[inline]
-    fn pruning_bound(&self) -> f64 {
-        self.get() + TIE_TOL
-    }
-
-    /// `fetch_min`: atomically lower the stored value to `candidate` if (and
-    /// only if) `candidate` is strictly smaller than the current value.  A
-    /// `NaN` candidate is ignored (the `<` test is always false for `NaN`).
-    #[inline]
-    fn observe(&self, candidate: f64) {
-        let mut cur = self.0.load(Ordering::Relaxed);
-        loop {
-            if !(candidate < f64::from_bits(cur)) {
-                return;
-            }
-            match self.0.compare_exchange_weak(
-                cur,
-                candidate.to_bits(),
-                Ordering::Relaxed,
-                Ordering::Relaxed,
-            ) {
-                Ok(_) => return,
-                Err(observed) => cur = observed,
-            }
-        }
-    }
-}
-
-/// Atomically add `delta` to the f64 stored in `acc` (bit-encoded in an
-/// `AtomicU64`) via a compare-and-swap loop, returning the NEW running total.
-///
-/// Used to maintain the cross-chunk running `Σ τ̂²` inside
-/// [`loocv_score_for_params`] for early-termination pruning.  It feeds ONLY
-/// the cancel decision — never the returned score — so its (non-deterministic)
-/// accumulation order across chunks cannot affect the numerical result.
-#[inline]
-fn atomic_add_f64(acc: &AtomicU64, delta: f64) -> f64 {
-    let mut cur = acc.load(Ordering::Relaxed);
-    loop {
-        let new = f64::from_bits(cur) + delta;
-        match acc.compare_exchange_weak(
-            cur,
-            new.to_bits(),
-            Ordering::Relaxed,
-            Ordering::Relaxed,
-        ) {
-            Ok(_) => return new,
-            Err(observed) => cur = observed,
-        }
+        (tau_sq_sum, n_valid, None)
     }
 }
 
@@ -765,23 +579,16 @@ pub fn univariate_loocv_search(
     let fixed_unit_eff = if fixed_unit.is_infinite() { 0.0 } else { fixed_unit };
     let fixed_nn_eff = if fixed_nn.is_infinite() { 1e10 } else { fixed_nn };
 
-    // Task 32: candidate-level parallelism.  Each univariate sweep evaluates
-    // its grid across the SHARED rayon pool via `par_iter`; every candidate's
-    // control-obs loop is itself chunk-parallel inside `loocv_score_for_params`
-    // (nested parallelism balanced by work-stealing on one global pool — there
-    // is deliberately no `grid.len()` switch).
-    //
-    // `atomic_best` tracks the lowest COMPLETE Q(λ) seen so far (fetch_min);
-    // each candidate reads it (plus a TIE_TOL margin) as its early-termination
-    // bound.  See `AtomicBestScore` docs for the numerical-identity proof:
-    // pruning only drops candidates strictly worse than the incumbent beyond
-    // TIE_TOL, so the argmin is never pruned and the selected (λ*, score) is
-    // unchanged.
-    //
+    // Evaluate all grid values in parallel.
     // Record the full (λ_time, λ_unit, λ_nn, score) tuple so that
-    // `better_candidate` can apply the structural tie-breaker on the dimension
-    // currently being searched.
-    let atomic_best = AtomicBestScore::new(best_score);
+    // `better_candidate` can apply the structural tie-breaker correctly on
+    // the dimension currently being searched.
+    //
+    // We snapshot the current `best_score` before launching the parallel
+    // batch.  Each thread uses this snapshot as the early-termination
+    // bound inside `loocv_score_for_params`.  While the snapshot is not
+    // dynamically updated across threads, it already prunes candidates
+    // whose partial Q(λ) exceeds the best score known at batch start.
     let results: Vec<(f64, f64, f64, f64, f64)> = grid
         .par_iter()
         .map(|&value| {
@@ -791,7 +598,7 @@ pub fn univariate_loocv_search(
                 _ => (fixed_time_eff, fixed_unit_eff, value),
             };
 
-            let (score, n_valid, _) = loocv_score_for_params(
+            let (score, _, _) = loocv_score_for_params(
                 y,
                 d,
                 control_mask,
@@ -803,14 +610,9 @@ pub fn univariate_loocv_search(
                 lambda_nn,
                 max_iter,
                 tol,
-                atomic_best.pruning_bound(),
+                best_score,
                 x,
             );
-            // Only complete evaluations are valid Q values; early-terminated
-            // partials must not lower the shared bound.
-            if n_valid == control_obs.len() {
-                atomic_best.observe(score);
-            }
             (value, lambda_time, lambda_unit, lambda_nn, score)
         })
         .collect();
@@ -867,14 +669,6 @@ fn univariate_loocv_search_cached(
 
     let n_control = control_obs.len();
 
-    // Task 32: candidate-level parallelism + P2.1 score cache.  Same nested
-    // scheme as `univariate_loocv_search` (see there for the full rationale):
-    // `par_iter` over candidates on the shared pool, chunk-parallel control-obs
-    // loop inside `loocv_score_for_params`, dynamic `atomic_best` pruning, and
-    // no `grid.len()` switch.  Cached scores are always COMPLETE evaluations
-    // (only complete or failed results are inserted below), so they may safely
-    // lower the shared pruning bound.
-    let atomic_best = AtomicBestScore::new(best_score);
     let results: Vec<(f64, f64, f64, f64, f64)> = grid
         .par_iter()
         .map(|&value| {
@@ -890,10 +684,9 @@ fn univariate_loocv_search_cached(
                 lambda_nn.to_bits(),
             );
 
-            // Check cache first.
+            // Check cache first
             if let Ok(cache) = score_cache.lock() {
                 if let Some(&(cached_score, _, _)) = cache.get(&cache_key) {
-                    atomic_best.observe(cached_score);
                     return (value, lambda_time, lambda_unit, lambda_nn, cached_score);
                 }
             }
@@ -910,18 +703,15 @@ fn univariate_loocv_search_cached(
                 lambda_nn,
                 max_iter,
                 tol,
-                atomic_best.pruning_bound(),
+                best_score,
                 x,
             );
 
-            // Cache only complete evaluations (not early-terminated).
+            // Cache only complete evaluations (not early-terminated)
             if n_valid == n_control || score == f64::INFINITY {
                 if let Ok(mut cache) = score_cache.lock() {
                     cache.insert(cache_key, (score, n_valid, first_failed));
                 }
-            }
-            if n_valid == n_control {
-                atomic_best.observe(score);
             }
 
             (value, lambda_time, lambda_unit, lambda_nn, score)
@@ -1314,14 +1104,12 @@ pub fn loocv_grid_search_exhaustive(
     // Parallel grid search.  `rayon::collect` preserves insertion order so
     // the later `better_candidate` sweep is deterministic.
     //
-    // Task 27: the batch shares a dynamic best score (`atomic_best`, fetch_min)
-    // so each combination can prune against the lowest COMPLETE Q(λ) found so
-    // far, plus a TIE_TOL margin.  The winning triple is re-evaluated by the
-    // full-diagnostic pass below, and pruning only ever drops combinations
-    // that are strictly worse than the incumbent beyond TIE_TOL, so the
-    // selected triple — and every reported quantity — is identical to the
-    // previous `f64::INFINITY` (no-prune) behaviour.  See `AtomicBestScore`.
-    let atomic_best = AtomicBestScore::new(f64::INFINITY);
+    // We pass `f64::INFINITY` as the early-termination bound because the
+    // parallel batch evaluates all combinations simultaneously and there is
+    // no sequential incumbent to prune against.  The per-observation early
+    // exit inside `loocv_score_for_params` still fires whenever a partial
+    // sum exceeds this (effectively infinite) bound — a no-op here, but
+    // keeps the interface uniform.
     let results: Vec<LoocvResultTuple> = grid_combinations
         .into_par_iter()
         .with_max_len(1) // Enable fine-grained work-stealing for load balancing
@@ -1345,12 +1133,9 @@ pub fn loocv_grid_search_exhaustive(
                 ln_eff,
                 max_iter,
                 tol,
-                atomic_best.pruning_bound(),
+                f64::INFINITY,
                 x,
             );
-            if n_valid == control_obs.len() {
-                atomic_best.observe(score);
-            }
             (lt, lu, ln, score, n_valid, first_failed)
         })
         .collect();
@@ -1654,15 +1439,7 @@ pub fn loocv_grid_search_joint(
         }
     }
 
-    // Parallel grid search.
-    //
-    // Task 27: share a dynamic best score (`atomic_best`, fetch_min) across the
-    // batch so each combination prunes against the lowest COMPLETE Q(λ) found
-    // so far plus a TIE_TOL margin.  The winner is re-evaluated by the
-    // full-diagnostic pass below and pruning only drops combinations strictly
-    // worse than the incumbent beyond TIE_TOL, so the selected triple is
-    // identical to the previous no-prune behaviour.  See `AtomicBestScore`.
-    let atomic_best = AtomicBestScore::new(f64::INFINITY);
+    // Parallel grid search
     let results: Vec<LoocvResultTuple> = grid_combinations
         .into_par_iter()
         .with_max_len(1) // Enable fine-grained work-stealing for load balancing
@@ -1682,12 +1459,9 @@ pub fn loocv_grid_search_joint(
                 treated_periods,
                 max_iter,
                 tol,
-                atomic_best.pruning_bound(),
+                f64::INFINITY,
                 x,
             );
-            if n_valid == control_obs.len() {
-                atomic_best.observe(score);
-            }
 
             (lt, lu, ln, score, n_valid, first_failed)
         })
@@ -1845,18 +1619,9 @@ pub fn loocv_cycling_search_joint_with_stage1(
             // univariate grid coordinate so that `better_candidate` can apply
             // the tie-breaker deterministically.
             //
-            // Task 27: `best_score_hint` seeds a dynamically shared best score
-            // (`atomic_best`, fetch_min).  Each candidate prunes against the
-            // lowest COMPLETE Q(λ) observed so far plus a TIE_TOL margin,
-            // rather than a static snapshot.  Pruning only drops candidates
-            // strictly worse than the incumbent beyond TIE_TOL, so the
-            // selected (λ*, score) is identical to the snapshot version (and
-            // strictly no more aggressive than the previous best_score_hint
-            // pruning).  Candidate parallelism is retained here (the joint
-            // path has no par_chunks control-obs variant); the joint grids
-            // that reach this closure are the coarse per-axis sweeps, which
-            // remain correct and merely under-parallelised on tiny grids.
-            let atomic_best = AtomicBestScore::new(best_score_hint);
+            // Snapshot `best_score_hint` as the early-termination bound for
+            // the parallel batch.  Each thread prunes candidates whose partial
+            // Q(λ) exceeds this bound (Q is a sum of non-negative τ̂² terms).
             #[allow(clippy::type_complexity)]
             let results: Vec<(f64, f64, f64, f64, f64, usize, Option<(usize, usize)>)> = grid
                 .par_iter()
@@ -1877,7 +1642,6 @@ pub fn loocv_cycling_search_joint_with_stage1(
                     let cache_key = (lt.to_bits(), lu.to_bits(), ln.to_bits());
                     if let Ok(cache) = joint_score_cache.lock() {
                         if let Some(&(cached_score, cached_n_valid, cached_failed)) = cache.get(&cache_key) {
-                            atomic_best.observe(cached_score);
                             return (val, lt, lu, ln, cached_score, cached_n_valid, cached_failed);
                         }
                     }
@@ -1892,7 +1656,7 @@ pub fn loocv_cycling_search_joint_with_stage1(
                         treated_periods,
                         max_iter,
                         tol,
-                        atomic_best.pruning_bound(),
+                        best_score_hint,
                         x,
                     );
 
@@ -1901,9 +1665,6 @@ pub fn loocv_cycling_search_joint_with_stage1(
                         if let Ok(mut cache) = joint_score_cache.lock() {
                             cache.insert(cache_key, (score, n_valid, first_failed));
                         }
-                    }
-                    if n_valid == n_attempted {
-                        atomic_best.observe(score);
                     }
 
                     (val, lt, lu, ln, score, n_valid, first_failed)
