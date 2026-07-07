@@ -35,6 +35,54 @@ thread_local! {
 }
 
 // ---------------------------------------------------------------------------
+// BLAS thread configuration (Task 28)
+// ---------------------------------------------------------------------------
+
+use std::sync::Once;
+
+static BLAS_THREADING_INIT: Once = Once::new();
+
+/// Constrain the platform BLAS/LAPACK backend to a single thread so it does
+/// not oversubscribe the CPU against rayon's parallelism (Task 28).
+///
+/// After Task 27 the LOOCV hot path drives exactly one level of rayon
+/// parallelism (either across λ candidates or across chunks of control
+/// observations).  Each parallel worker then calls the platform BLAS backend
+/// for the per-cell SVD / least-squares solves.  If that backend also spins
+/// up its own thread pool the two layers oversubscribe the physical cores and
+/// hurt throughput, so we request a single BLAS thread and leave all
+/// parallelism to rayon.
+///
+/// Mechanism / reliability:
+///   * macOS (Accelerate / vecLib): `VECLIB_MAXIMUM_THREADS=1`.
+///   * Linux (OpenBLAS): `OPENBLAS_NUM_THREADS=1` and `OMP_NUM_THREADS=1`.
+///   * Windows (faer, pure-Rust): no external BLAS pool — effectively a no-op.
+///
+/// These backends read the variables when they lazily initialise their thread
+/// pools, which for the Stata plugin happens on the first BLAS call — i.e.
+/// inside the first heavy entry point, *after* this `Once` has run.  Setting
+/// them here is therefore honoured in the common case.  It is not
+/// bullet-proof: if a backend already initialised its pool in the host
+/// process before the plugin was first invoked, the variable is ignored.  In
+/// that residual case the per-cell SVD dimensions (T × N) are small enough
+/// that BLAS-internal threading brings negligible benefit and the
+/// oversubscription cost is bounded.  For a hard guarantee users can export
+/// `VECLIB_MAXIMUM_THREADS=1` / `OPENBLAS_NUM_THREADS=1` in the shell that
+/// launches Stata.
+fn configure_blas_threading() {
+    BLAS_THREADING_INIT.call_once(|| {
+        // Edition 2021: `std::env::set_var` is a safe function.
+        #[cfg(target_os = "macos")]
+        std::env::set_var("VECLIB_MAXIMUM_THREADS", "1");
+        #[cfg(target_os = "linux")]
+        {
+            std::env::set_var("OPENBLAS_NUM_THREADS", "1");
+            std::env::set_var("OMP_NUM_THREADS", "1");
+        }
+    });
+}
+
+// ---------------------------------------------------------------------------
 // Column-major pointer conversion helpers
 // ---------------------------------------------------------------------------
 
@@ -89,6 +137,9 @@ macro_rules! catch_panic {
     ($body:expr) => {{
         // Clear previous panic message at entry
         LAST_PANIC_MESSAGE.with(|m| m.borrow_mut().clear());
+        // Task 28: pin the BLAS backend to a single thread before any solve so
+        // it does not oversubscribe against rayon (idempotent, `Once`-guarded).
+        configure_blas_threading();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| $body));
         match result {
             Ok(r) => r,

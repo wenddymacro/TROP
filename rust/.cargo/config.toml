@@ -1,0 +1,27 @@
+# Task 28: build-layer optimisation for the TROP core.
+#
+# Per-target `target-cpu` selection.  We deliberately AVOID
+# `target-cpu=native`: the release artifacts are cross-compiled and
+# redistributed (SSC / GitHub releases), so `native` would bake in the build
+# machine's ISA and crash on older CPUs.  Instead we pin a portable baseline
+# per target.
+
+# Linux x64 release: x86-64-v3 == SSE4.2 + AVX + AVX2 + BMI2 + FMA, the modern
+# server/desktop baseline (Haswell 2013+).  Enables AVX2 codegen for the
+# numeric hot paths while remaining portable across contemporary hardware.
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "target-cpu=x86-64-v3"]
+
+# Windows x64 release: same AVX2 baseline.  Both the GNU and MSVC ABIs are
+# covered so cross-compilation from macOS (GNU) and native CI (MSVC) match.
+[target.x86_64-pc-windows-gnu]
+rustflags = ["-C", "target-cpu=x86-64-v3"]
+
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-cpu=x86-64-v3"]
+
+# macOS ARM64: the architecture floor is fixed (all Apple Silicon is M1+), so
+# there is no portability risk in naming the microarch.  `apple-m1` matches the
+# rustc default for this triple and documents the intent explicitly.
+[target.aarch64-apple-darwin]
+rustflags = ["-C", "target-cpu=apple-m1"]
