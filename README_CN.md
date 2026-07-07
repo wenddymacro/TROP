@@ -473,6 +473,7 @@ trop_data 10_trop_stata, type(notebook)
 **网格注意事项：**
 - `lambda_time_grid()` 和 `lambda_unit_grid()` 必须为有限非负数列；Stata 缺失值（`.`）会在解析时被拒绝。
 - `lambda_nn_grid()` 和 `fixedlambda()` 的第三个位置接受 `.` 表示 +∞（DID/TWFE 角点，L ≡ 0）。`default` 网格**不**包含此角点；使用 `grid_style(extended)` 或在自定义 `lambda_nn_grid()` 中添加 `.` 以允许 LOOCV 选择"无因子结构"机制（经典 DID / 合成控制）。
+- **大面板性能：** 落在开区间 `(0, 0.1)` 的 `lambda_nn` 值（尤其是 `default` 网格里的 `0.01`）评估成本最高：`0 < lambda_nn < 0.1` 会走 FISTA 求解（内层上限抬到 50，每次内层迭代做一次完整的 T×N SVD），而 `lambda_nn = 0` 与 `lambda_nn ≥ 0.1` 只走廉价的闭式路径。在约 8,300 个控制格的规模下，单个此类内点候选实测每格比 `lambda_nn = 0` 慢数万倍（约 12,600 毫秒/格 对 约 0.2 毫秒/格），即单个候选就可能耗时数十小时。大面板建议自定义网格避开该开区间，例如 `lambda_nn_grid(0 1 10)`。
 
 **其他可选选项：**
 

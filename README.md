@@ -449,6 +449,15 @@ Post-estimation (available after `trop`):
   include this corner; use `grid_style(extended)` or add `.` to a custom
   `lambda_nn_grid()` to let LOOCV select the "no factor structure" regime
   (classical DID / synthetic control).
+- **Large-panel performance:** `lambda_nn` values in the open interval `(0, 0.1)`
+  — especially the `0.01` point of the `default` grid — are by far the costliest
+  to evaluate, because `0 < lambda_nn < 0.1` triggers a FISTA solve (inner cap 50,
+  one full T×N SVD per inner step) whereas `lambda_nn = 0` and `lambda_nn ≥ 0.1`
+  use cheap closed-form paths. At ~8,300 control cells one interior candidate was
+  measured tens of thousands of times slower per cell than `lambda_nn = 0` (≈12,600
+  ms/cell vs ≈0.2 ms/cell), i.e. tens of hours for that single candidate. On large
+  panels prefer a custom grid that avoids the open interval, e.g.
+  `lambda_nn_grid(0 1 10)`.
 
 ### trop_bootstrap Options
 

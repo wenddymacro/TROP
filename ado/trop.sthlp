@@ -209,6 +209,21 @@ DID / TWFE special case.  The {opt grid_style(default)} preset does not
 include this corner; opt in via {opt grid_style(extended)} or a custom
 {opt lambda_nn_grid()} that contains {cmd:.} or a sufficiently large value.
 
+{pmore}
+{bf:Performance caveat (large panels):} lambda_nn values in the open interval
+{cmd:(0, 0.1)} - most notably the {cmd:0.01} point of the default grid - are by
+far the most expensive to evaluate. For {cmd:0 < lambda_nn < 0.1} the
+nuclear-norm subproblem is solved by FISTA with the inner-iteration cap raised
+to 50, and every inner step costs one full T-by-N SVD; by contrast
+{cmd:lambda_nn = 0} and {cmd:lambda_nn >= 0.1} take cheap closed-form paths.
+On a large panel a single interior candidate can therefore dominate the whole
+search: at roughly 8,300 control cells one such point was measured tens of
+thousands of times slower per cell than {cmd:lambda_nn = 0} (about 12,600
+ms/cell versus about 0.2 ms/cell), i.e. tens of hours for that one candidate
+alone. Large-panel users are advised to supply a custom grid that avoids the
+open interval, e.g. {cmd:lambda_nn_grid(0 1 10)}, which keeps only the cheap
+regimes.
+
 {phang}
 {opt joint_loocv(cycling|exhaustive)} selects the LOOCV search strategy for
 the joint method. Only effective when {opt method(joint)} is combined with
