@@ -77,10 +77,15 @@ d
 d === License ===
 f LICENSE
 d
-d === Paper Datasets (use: trop_data cps_logwage) ===
+d === Paper Datasets ===
 d Note: cps_logwage, cps_urate, pwt_loggdp have real treatment indicators.
 d Note: germany_gdp, basque_gdp, smoking_packs have d=0 (for semi-synthetic simulation).
-d Datasets are downloaded on first use via trop_data command and cached in adopath.
+d SSC distribution: datasets ship as flat ancillary files; download via
+d   net get trop  (then: use cps_logwage.dta, clear).
+d GitHub distribution: the trop_data command downloads/caches datasets
+d   on first use (net get with subdirectory paths is unreliable on GitHub,
+d   so no dataset lines are declared here; the flat SSC zip built by
+d   build_ssc_zip.sh injects flat 'f *.dta' ancillary lines instead).
 d
 d === Ancillary Files (install via: net get trop) ===
 g ancillary/10_trop_stata.ipynb

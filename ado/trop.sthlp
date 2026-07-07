@@ -737,7 +737,14 @@ Average treatment effect within each post-treatment period (event-time path):
 {bf:{hline 70}}
 
 {pstd}
-The {cmd:trop} package ships six panel datasets under {cmd:data/}:
+The {cmd:trop} package ships six panel datasets.  After installing from
+SSC, download them once into your working directory with {cmd:net get}:
+
+{phang2}{cmd:. net get trop}{p_end}
+
+{pstd}
+This places the six {cmd:.dta} files in the current directory, ready to
+{cmd:use}:
 
 {col 5}Dataset{col 30}Source{col 55}N{col 60}T{col 65}Treatment
 {col 5}{hline 70}
@@ -764,8 +771,10 @@ below for a worked demonstration.
 
 {pstd}
 The following four examples demonstrate end-to-end workflows using real
-and simulated panel data.  All datasets are included with the {cmd:trop}
-package under {cmd:data/}.
+and simulated panel data.  The bundled datasets are downloaded once with
+{cmd:net get trop} (see above) and then loaded with {cmd:use}.  As a
+convenience, {cmd:trop_data} {it:name} downloads and loads a single
+dataset in one step (used in Example 1 below).
 
 
 {pstd}
@@ -777,9 +786,17 @@ wage effects on log wages across U.S. states.  The CPS dataset contains
 50 states observed from 1979 to 2018; 8 states are treated at t=2018.
 The outcome variable {cmd:y} is the log average weekly wage.
 
-{pstd}Load example data:{p_end}
+{phang}{it:Step 1: Download example datasets (one-time, after installation)}{p_end}
 
-{phang2}{cmd:. trop_data cps_logwage}{p_end}
+{phang2}{cmd:. net get trop}{p_end}
+
+{phang}{it:Load the CPS log-wage panel}{p_end}
+
+{phang2}{cmd:. use cps_logwage.dta, clear}{p_end}
+
+{pstd}
+Alternatively, {cmd:trop_data cps_logwage} downloads and loads the
+dataset in one step.
 
 {phang}{it:Step 2: Estimate ATT using the twostep (local) method with bootstrap}{p_end}
 
@@ -827,7 +844,7 @@ window make this an ideal setting for the {cmd:joint} estimator.
 
 {phang}{it:Step 1: Load PWT data}{p_end}
 
-{phang2}{cmd:. use "data/pwt_loggdp.dta", clear}{p_end}
+{phang2}{cmd:. use pwt_loggdp.dta, clear}{p_end}
 {phang2}{cmd:. summarize}{p_end}
 {phang2}{cmd:. display "N_units = " r(N) / 48 " | T = 48 | Treated = 29"}{p_end}
 
@@ -948,7 +965,7 @@ approaches.
 
 {phang}{it:Approach A: Treated-unit simulation (designate Basque Country)}{p_end}
 
-{phang2}{cmd:. use "data/basque_gdp.dta", clear}{p_end}
+{phang2}{cmd:. use basque_gdp.dta, clear}{p_end}
 {phang2}{cmd:. tab d}{p_end}
 {phang2}{cmd:. * All d=0 -- assign treatment to unit 17 (Basque Country) post-1970}{p_end}
 {phang2}{cmd:. replace d = (id == 17) & (t >= 1970)}{p_end}
@@ -958,7 +975,7 @@ approaches.
 
 {phang}{it:Approach B: Random treatment assignment (Table 1 design)}{p_end}
 
-{phang2}{cmd:. use "data/basque_gdp.dta", clear}{p_end}
+{phang2}{cmd:. use basque_gdp.dta, clear}{p_end}
 {phang2}{cmd:. * Randomly assign 3 units as treated from t >= 1975}{p_end}
 {phang2}{cmd:. set seed 2025}{p_end}
 {phang2}{cmd:. bysort id: gen tag = (_n == 1)}{p_end}

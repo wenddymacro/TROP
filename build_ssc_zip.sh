@@ -42,9 +42,32 @@ cp "$SCRIPT_DIR/LICENSE" "$OUT_DIR/"
 # stata.toc
 cp "$SCRIPT_DIR/stata.toc" "$OUT_DIR/"
 
+# Paper datasets (ancillary; downloaded flat via: net get trop)
+DATASETS="cps_logwage cps_urate pwt_loggdp germany_gdp basque_gdp smoking_packs"
+for ds in $DATASETS; do
+    cp "$SCRIPT_DIR/data/$ds.dta" "$OUT_DIR/"
+done
+
 # --- Generate flat trop.pkg ---
 # Transform: remove all directory prefixes from f/g lines
 sed -E 's|^f ado/|f |; s|^f mata/|f |; s|^g ancillary/|g |' "$SCRIPT_DIR/trop.pkg" > "$OUT_DIR/trop.pkg"
+
+# Append flat ancillary file-lines for the six paper datasets (no data/ prefix).
+# NOTE: In the Stata .pkg format, 'g' is the PLATFORM-SPECIFIC directive
+# (syntax: g platform filename), NOT an ancillary marker. Ancillary files
+# are declared with 'f'; Stata auto-classifies any 'f' file whose extension
+# is not installable (.ado/.sthlp/.mlib/.mata/.plugin) as an ancillary file
+# retrievable via: net get trop. The GitHub source pkg intentionally omits
+# these .dta lines because net get with subdirectory paths is unreliable on
+# GitHub; the SSC flat zip has no subdirectories, so flat 'f *.dta' lines
+# download reliably into the user's working directory.
+{
+    echo "d"
+    echo "d === Paper Datasets (SSC ancillary; download via: net get trop) ==="
+    for ds in $DATASETS; do
+        echo "f $ds.dta"
+    done
+} >> "$OUT_DIR/trop.pkg"
 
 # --- Create ZIP (flat, no paths) ---
 cd "$OUT_DIR"
@@ -88,6 +111,22 @@ for f in trop.pkg trop.ado trop.sthlp trop_estat.sthlp trop_predict.sthlp \
         echo "  ✓ $f"
     else
         echo "  ✗ MISSING: $f"
+        ERRORS=$((ERRORS + 1))
+    fi
+done
+
+# Check paper datasets present in zip AND declared as flat g-lines in pkg
+for ds in $DATASETS; do
+    if unzip -l "$ZIP_NAME" | grep -q " $ds.dta$"; then
+        echo "  ✓ $ds.dta (in zip)"
+    else
+        echo "  ✗ MISSING in zip: $ds.dta"
+        ERRORS=$((ERRORS + 1))
+    fi
+    if unzip -p "$ZIP_NAME" trop.pkg | grep -q "^f $ds.dta$"; then
+        echo "  ✓ f $ds.dta (in pkg)"
+    else
+        echo "  ✗ MISSING f-line in pkg: f $ds.dta"
         ERRORS=$((ERRORS + 1))
     fi
 done
