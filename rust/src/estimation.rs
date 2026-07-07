@@ -12,8 +12,8 @@
 
 #[cfg(target_os = "macos")]
 use crate::newlapack;
-use faer::linalg::solvers::Svd;
-use faer::Mat;
+use faer::linalg::solvers::{SelfAdjointEigen, Svd};
+use faer::{Mat, Side};
 #[cfg(target_os = "linux")]
 use lapack::dgelsd;
 use ndarray::{Array1, Array2, ArrayView2, Axis};
@@ -42,6 +42,23 @@ const MAX_INNER_ITER_HIGH: usize = 50;
 ///   1. Counting nonzero singular values after thresholding.
 ///   2. Skipping near-zero components in truncated SVD reconstruction.
 pub const SVD_TRUNCATION_TOL: f64 = 1e-10;
+
+/// Relative eigen-residual tolerance for accepting the Gram-based soft-threshold
+/// fast path.  For a kept component the reconstructed singular pair must satisfy
+/// `‖M v_i − σ_i u_i‖ ≤ GRAM_RES_TOL_REL · σ_max`; otherwise the eigensolve is
+/// deemed unreliable and the full-SVD path is used instead.  A backward-stable
+/// symmetric eigensolver yields residuals near `ε_mach · σ_max`, so this leaves
+/// several orders of margin while still catching non-convergent solves.
+const GRAM_RES_TOL_REL: f64 = 1e-9;
+
+/// Per-component analytic error budget (absolute, on reconstructed L entries)
+/// for the Gram-based fast path.  Forming `G = M Mᵀ` squares the condition
+/// number, so the singular value `σ_i = √λ_i` inherits an absolute error of
+/// roughly `ε_mach · σ_max² / (2 σ_i)`.  Propagated through the shrinkage this
+/// bounds the entry error by `ε_mach · threshold · σ_max² / (2 σ_i²)`.  If any
+/// kept component's predicted error exceeds this budget the path falls back to
+/// the full SVD, guaranteeing agreement with the exact prox to `< 1e-10`.
+const GRAM_ERR_BUDGET: f64 = 1e-12;
 
 /// Tolerance for detecting degenerate (all-zero) weight matrices.
 ///
@@ -248,6 +265,37 @@ pub fn soft_threshold_svd(m: &Array2<f64>, threshold: f64) -> Option<Array2<f64>
         return Some(Array2::zeros(m.raw_dim()));
     }
 
+    // ---- Point 6: Frobenius short-circuit (exact, zero-risk) ----
+    // Since σ_max ≤ ‖M‖_F = √(Σ σ_i²), a threshold ≥ ‖M‖_F dominates every
+    // singular value, so (σ_i − threshold)_+ = 0 for all i and the proximal
+    // operator is *exactly* the zero matrix.  This is mathematically identical
+    // to the full-SVD result while skipping the SVD entirely (O(TN)).  It also
+    // fires on the Stage-1 λ_nn = ∞ initialization (internally 1e10), where L
+    // must be 0 by construction.
+    let frob_norm = m.iter().map(|&x| x * x).sum::<f64>().sqrt();
+    if threshold >= frob_norm {
+        return Some(Array2::zeros(m.raw_dim()));
+    }
+
+    // ---- Point 7: Gram-trick accelerated path (validated + robust fallback) ----
+    // Returns `None` when the eigensolve is judged insufficiently accurate to
+    // match the full SVD to < 1e-10, in which case we fall through to the
+    // guaranteed-correct full-SVD path below.
+    if let Some(result) = soft_threshold_svd_gram(m, threshold) {
+        return Some(result);
+    }
+
+    // ---- Fallback: exact full-SVD soft-threshold (always correct) ----
+    soft_threshold_svd_full(m, threshold)
+}
+
+/// Full-SVD soft-thresholding: `U diag(max(σ_k − threshold, 0)) Vᵀ`.
+///
+/// This is the reference (always-correct) implementation. `soft_threshold_svd`
+/// dispatches here whenever the accelerated Gram path declines (returns `None`)
+/// or is not applicable. Callers must ensure `threshold > 0` and `m` finite;
+/// those cases are handled by `soft_threshold_svd`.
+fn soft_threshold_svd_full(m: &Array2<f64>, threshold: f64) -> Option<Array2<f64>> {
     let n_rows = m.nrows();
     let n_cols = m.ncols();
 
@@ -297,6 +345,175 @@ pub fn soft_threshold_svd(m: &Array2<f64>, threshold: f64) -> Option<Array2<f64>
                 for j in 0..n_cols {
                     result[[i, j]] += s_thresh[idx] * u[(i, idx)] * v[(j, idx)];
                 }
+            }
+        }
+    }
+
+    Some(result)
+}
+
+/// Gram-trick soft-thresholding for the smaller matrix dimension.
+///
+/// For an `T×N` matrix `M` the SVD-based prox only needs singular values above
+/// the threshold.  Forming the smaller Gram matrix and taking its symmetric
+/// eigendecomposition is a constant factor cheaper than a direct bidiagonal SVD
+/// of the tall/wide matrix:
+///
+/// - If `T ≤ N`: `G = M Mᵀ` is `T×T`, `G = U Λ Uᵀ`, `σ_i = √λ_i`, `U` are the
+///   left singular vectors, and `v_i = Mᵀ u_i / σ_i`.
+/// - If `N < T`: `G = Mᵀ M` is `N×N`, its eigenvectors are the right singular
+///   vectors `v_i`, and `u_i = M v_i / σ_i`.
+///
+/// The result equals `Σ_{σ_i > threshold} (σ_i − threshold) u_i v_iᵀ`.
+///
+/// # Robustness / fallback
+/// Forming the Gram matrix squares the condition number, so this method is only
+/// trustworthy for the *large* singular values it keeps.  For every kept
+/// component we (a) bound the analytic singular-value error against
+/// [`GRAM_ERR_BUDGET`] and (b) verify the reconstructed singular pair via the
+/// residual `‖M v_i − σ_i u_i‖` against [`GRAM_RES_TOL_REL`].  If either check
+/// fails, or the eigendecomposition fails, this returns `None` so the caller
+/// falls back to the exact full SVD.  This guarantees the returned matrix
+/// matches the full-SVD prox to `< 1e-10`.
+fn soft_threshold_svd_gram(m: &Array2<f64>, threshold: f64) -> Option<Array2<f64>> {
+    let t = m.nrows();
+    let n = m.ncols();
+    if t == 0 || n == 0 {
+        return None; // let the full path handle degenerate shapes
+    }
+
+    // Work on the smaller dimension. `rows_are_eigvecs` == true means the Gram
+    // matrix is M Mᵀ (T×T) and its eigenvectors are the LEFT singular vectors.
+    let rows_are_eigvecs = t <= n;
+    let dim = t.min(n);
+
+    // Build the symmetric Gram matrix.
+    let g = if rows_are_eigvecs {
+        // G = M Mᵀ  →  G[i,j] = <row_i, row_j>
+        Mat::from_fn(dim, dim, |i, j| {
+            let mut acc = 0.0;
+            for c in 0..n {
+                acc += m[[i, c]] * m[[j, c]];
+            }
+            acc
+        })
+    } else {
+        // G = Mᵀ M  →  G[i,j] = <col_i, col_j>
+        Mat::from_fn(dim, dim, |i, j| {
+            let mut acc = 0.0;
+            for r in 0..t {
+                acc += m[[r, i]] * m[[r, j]];
+            }
+            acc
+        })
+    };
+
+    // Symmetric eigendecomposition (eigenvalues sorted nondecreasing by faer).
+    let eig = match SelfAdjointEigen::new(g.as_ref(), Side::Lower) {
+        Ok(e) => e,
+        Err(_) => return None,
+    };
+    let evals = eig.S().column_vector();
+    let evecs = eig.U();
+
+    // Guard against non-finite eigenvalues.
+    for i in 0..dim {
+        if !evals[i].is_finite() {
+            return None;
+        }
+    }
+
+    // λ_max is the last (largest) eigenvalue; clamp tiny negatives from rounding.
+    let lambda_max = evals[dim - 1].max(0.0);
+    let sigma_max = lambda_max.sqrt();
+    if !(sigma_max > 0.0) {
+        // M is numerically zero; prox is the zero matrix.
+        return Some(Array2::zeros((t, n)));
+    }
+    let sigma_max_sq = sigma_max * sigma_max;
+    let res_tol = GRAM_RES_TOL_REL * sigma_max;
+    let eps_mach = f64::EPSILON;
+
+    let mut result = Array2::<f64>::zeros((t, n));
+
+    for idx in 0..dim {
+        let lam = evals[idx].max(0.0);
+        let sigma = lam.sqrt();
+        let shrunk = sigma - threshold;
+        if shrunk <= SVD_TRUNCATION_TOL {
+            continue; // thresholded to (numerical) zero — skip
+        }
+
+        // Analytic error budget: reject if σ is too small relative to σ_max for
+        // the Gram-squared conditioning to remain accurate at 1e-10 level.
+        let predicted_err = eps_mach * threshold * sigma_max_sq / (2.0 * sigma * sigma);
+        if predicted_err > GRAM_ERR_BUDGET {
+            return None;
+        }
+
+        // Reconstruct the singular pair (u_i length T, v_i length N).
+        let mut u = vec![0.0_f64; t];
+        let mut v = vec![0.0_f64; n];
+        if rows_are_eigvecs {
+            // eigenvector is u_i (left); v_i = Mᵀ u_i / σ_i.
+            for k in 0..t {
+                u[k] = evecs[(k, idx)];
+            }
+            for j in 0..n {
+                let mut acc = 0.0;
+                for k in 0..t {
+                    acc += m[[k, j]] * u[k];
+                }
+                v[j] = acc / sigma;
+            }
+            // Residual check: ‖M v_i − σ_i u_i‖.
+            let mut res_sq = 0.0;
+            for k in 0..t {
+                let mut mv = 0.0;
+                for j in 0..n {
+                    mv += m[[k, j]] * v[j];
+                }
+                let d = mv - sigma * u[k];
+                res_sq += d * d;
+            }
+            if res_sq.sqrt() > res_tol {
+                return None;
+            }
+        } else {
+            // eigenvector is v_i (right); u_i = M v_i / σ_i.
+            for j in 0..n {
+                v[j] = evecs[(j, idx)];
+            }
+            for k in 0..t {
+                let mut acc = 0.0;
+                for j in 0..n {
+                    acc += m[[k, j]] * v[j];
+                }
+                u[k] = acc / sigma;
+            }
+            // Residual check: ‖Mᵀ u_i − σ_i v_i‖.
+            let mut res_sq = 0.0;
+            for j in 0..n {
+                let mut mtu = 0.0;
+                for k in 0..t {
+                    mtu += m[[k, j]] * u[k];
+                }
+                let d = mtu - sigma * v[j];
+                res_sq += d * d;
+            }
+            if res_sq.sqrt() > res_tol {
+                return None;
+            }
+        }
+
+        // Accumulate the rank-1 contribution (σ_i − threshold) u_i v_iᵀ.
+        for k in 0..t {
+            let scaled = shrunk * u[k];
+            if scaled == 0.0 {
+                continue;
+            }
+            for j in 0..n {
+                result[[k, j]] += scaled * v[j];
             }
         }
     }
@@ -1844,6 +2061,157 @@ mod tests {
         let result_norm: f64 = result.iter().map(|x| x * x).sum::<f64>().sqrt();
 
         assert!(result_norm <= orig_norm + 1e-10);
+    }
+
+    // ===== Task 40: Gram fast-path vs full-SVD equivalence =====
+
+    /// Build a T×N matrix as a rank-`r` factor model plus small Gaussian-ish
+    /// noise, using a deterministic RNG for reproducibility.
+    fn build_factor_matrix(t: usize, n: usize, r: usize, noise: f64, seed: u64) -> Array2<f64> {
+        use rand::prelude::*;
+        use rand_xoshiro::Xoshiro256PlusPlus;
+        let mut rng = Xoshiro256PlusPlus::seed_from_u64(seed);
+        let f = Array2::from_shape_fn((t, r), |_| rng.gen::<f64>() - 0.5);
+        let g = Array2::from_shape_fn((r, n), |_| rng.gen::<f64>() - 0.5);
+        let mut m = f.dot(&g);
+        for v in m.iter_mut() {
+            *v += noise * (rng.gen::<f64>() - 0.5);
+        }
+        m
+    }
+
+    /// Frobenius norm of the entrywise difference.
+    fn max_abs_diff_2d(a: &Array2<f64>, b: &Array2<f64>) -> f64 {
+        a.iter()
+            .zip(b.iter())
+            .map(|(x, y)| (x - y).abs())
+            .fold(0.0_f64, f64::max)
+    }
+
+    #[test]
+    fn test_gram_vs_full_svd_equivalence() {
+        // (T, N, rank, noise, seed) covering wide (T<N), tall (T>N), and square.
+        let shapes = [
+            (51usize, 175usize, 3usize, 0.1, 11u64), // ddcg-like wide matrix
+            (175, 51, 3, 0.1, 12),                   // tall matrix
+            (40, 40, 5, 0.2, 13),                    // square
+            (20, 60, 8, 0.05, 14),                   // wide, higher rank
+            (10, 10, 10, 0.3, 15),                   // full-rank square
+            (5, 12, 2, 0.15, 16),                    // small wide
+        ];
+        // Slow-band 0.05, moderate 0.5, 1.0 are the shipped regimes.
+        let lambdas = [0.05_f64, 0.5, 1.0, 2.0];
+
+        let mut gram_used = 0usize;
+        let mut total = 0usize;
+        for &(t, n, r, noise, seed) in &shapes {
+            let m = build_factor_matrix(t, n, r, noise, seed);
+            for &lam in &lambdas {
+                total += 1;
+                let full = soft_threshold_svd_full(&m, lam).unwrap();
+                if let Some(gram) = soft_threshold_svd_gram(&m, lam) {
+                    gram_used += 1;
+                    let d = max_abs_diff_2d(&full, &gram);
+                    assert!(
+                        d < 1e-10,
+                        "Gram vs full SVD mismatch: shape=({t}x{n}) rank={r} lambda={lam} max_abs_diff={d:.3e}"
+                    );
+                }
+            }
+        }
+        // The Gram path must actually be exercised on the trustworthy regimes,
+        // otherwise this test would be vacuously green.
+        assert!(
+            gram_used > total / 2,
+            "Gram path exercised too rarely: {gram_used}/{total}"
+        );
+    }
+
+    #[test]
+    fn test_gram_matches_dispatcher_across_lambda_grid() {
+        // The public dispatcher must agree with the reference full SVD for every
+        // lambda regardless of whether the Gram path or fallback is taken.
+        let m = build_factor_matrix(51, 175, 3, 0.1, 21);
+        for &lam in &[0.01_f64, 0.05, 0.1, 0.5, 1.0, 1.5, 3.0] {
+            let full = soft_threshold_svd_full(&m, lam).unwrap();
+            let dispatched = soft_threshold_svd(&m, lam).unwrap();
+            let d = max_abs_diff_2d(&full, &dispatched);
+            assert!(d < 1e-10, "dispatcher mismatch at lambda={lam}: {d:.3e}");
+        }
+    }
+
+    #[test]
+    fn test_frobenius_short_circuit_returns_zero() {
+        // Point 6: threshold ≥ ‖M‖_F must yield exactly the zero matrix, and it
+        // must match the full-SVD result.
+        let m = build_factor_matrix(30, 80, 4, 0.2, 31);
+        let frob = m.iter().map(|x| x * x).sum::<f64>().sqrt();
+
+        // threshold just above the Frobenius norm
+        let res = soft_threshold_svd(&m, frob * 1.0000001).unwrap();
+        assert!(res.iter().all(|&x| x == 0.0), "expected exact zero matrix");
+
+        // the extreme Stage-1 initialization value (lambda_nn -> inf uses 1e10)
+        let res_inf = soft_threshold_svd(&m, 1e10).unwrap();
+        assert!(res_inf.iter().all(|&x| x == 0.0));
+
+        // full SVD agrees for a threshold well above sigma_max
+        let full = soft_threshold_svd_full(&m, frob * 2.0).unwrap();
+        let disp = soft_threshold_svd(&m, frob * 2.0).unwrap();
+        assert!(max_abs_diff_2d(&full, &disp) < 1e-10);
+    }
+
+    #[test]
+    fn test_gram_threshold_boundary_values() {
+        // Thresholds straddling individual singular values: the prox is highly
+        // sensitive here, so agreement to 1e-10 (or a clean fallback) is the key
+        // correctness guarantee.
+        let m = build_factor_matrix(24, 60, 4, 0.1, 41);
+        // Get the true singular values via full SVD of the (small) Gram.
+        let faer_m = Mat::from_fn(24, 60, |i, j| m[[i, j]]);
+        let svd = Svd::new(faer_m.as_ref()).unwrap();
+        let s = svd.S().column_vector();
+        let k = 24.min(60);
+        for idx in 0..k {
+            let sv = s[idx];
+            if sv < 1e-6 {
+                continue;
+            }
+            for &delta in &[-1e-6_f64, 0.0, 1e-6] {
+                let lam = (sv + delta).max(1e-8);
+                let full = soft_threshold_svd_full(&m, lam).unwrap();
+                if let Some(gram) = soft_threshold_svd_gram(&m, lam) {
+                    let d = max_abs_diff_2d(&full, &gram);
+                    assert!(d < 1e-10, "boundary mismatch lambda={lam}: {d:.3e}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_gram_small_and_edge_shapes() {
+        // 1x1, 2x2, and a rank-1 matrix all round-trip through the dispatcher.
+        let m1 = array![[3.0]];
+        let full1 = soft_threshold_svd_full(&m1, 1.0).unwrap();
+        let disp1 = soft_threshold_svd(&m1, 1.0).unwrap();
+        assert!(max_abs_diff_2d(&full1, &disp1) < 1e-10);
+
+        let m2 = array![[1.0, 2.0], [3.0, 4.0]];
+        for &lam in &[0.1_f64, 1.0, 3.0] {
+            let full = soft_threshold_svd_full(&m2, lam).unwrap();
+            let disp = soft_threshold_svd(&m2, lam).unwrap();
+            assert!(max_abs_diff_2d(&full, &disp) < 1e-10, "2x2 lambda={lam}");
+        }
+
+        // Rank-1 outer product.
+        let a = array![1.0, 2.0, 3.0, 4.0];
+        let b = array![2.0, -1.0, 0.5];
+        let m3 = Array2::from_shape_fn((4, 3), |(i, j)| a[i] * b[j]);
+        for &lam in &[0.5_f64, 2.0] {
+            let full = soft_threshold_svd_full(&m3, lam).unwrap();
+            let disp = soft_threshold_svd(&m3, lam).unwrap();
+            assert!(max_abs_diff_2d(&full, &disp) < 1e-10, "rank1 lambda={lam}");
+        }
     }
 
     #[test]
