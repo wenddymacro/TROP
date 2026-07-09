@@ -87,7 +87,7 @@ jobs:
         working-directory: plugin
         shell: cmd
         run: |
-          cl /LD /O2 /DSYSTEM=1 /I. ^
+          cl /LD /O2 /DSYSTEM=4 /I. ^
             stata_bridge.c stplugin.c ^
             /link /LIBPATH:..\rust\target\${{ matrix.target }}\release ^
             trop_core.lib ws2_32.lib advapi32.lib userenv.lib bcrypt.lib ^
