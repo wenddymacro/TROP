@@ -49,7 +49,7 @@ program define trop, eclass
     // requires exactly two variables.  This allows users to verify the
     // installed version without supplying a varlist.
     if `"`0'"' == ", version" | `"`0'"' == ",version" | `"`0'"' == "version" {
-        di as txt "trop version 1.2.0"
+        di as txt "trop version 1.2.1"
         di as txt "Triply Robust Panel Estimator"
         di as txt "Athey, Imbens, Qu & Viviano (2025)"
         di as txt ""

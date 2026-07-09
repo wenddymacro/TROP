@@ -1,8 +1,8 @@
 v 3
 d TROP - Triply RObust Panel Estimator
-d Version: 1.2.0
+d Version: 1.2.1
 d Athey, Imbens, Qu & Viviano (2025)
-d Distribution-Date: 20260703
+d Distribution-Date: 20260709
 d License: AGPL-3.0
 d
 d === ADO Files ===
