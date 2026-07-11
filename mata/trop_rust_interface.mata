@@ -101,9 +101,11 @@ string scalar _trop_get_plugin_name_platform()
 /*──────────────────────────────────────────────────────────────────────────────
   _trop_get_plugin_path()
 
-  Searches for the plugin binary.  After SSC/net install the file is
-  simply "trop.plugin" on the adopath.  For development builds, also
-  checks platform-specific names under plugin/ subdirectories.
+  Searches for the plugin binary with a two-tier fallback:
+    1) SSC install: g/h directives rename to "trop.plugin" — found first.
+    2) GitHub install: g/h not effective, files keep platform-specific names
+       (trop_macos_arm64.plugin, trop_macos_x64.plugin, etc.).
+  Also checks development build paths under plugin/ subdirectories.
 
   Returns the full path if found, "" otherwise.
 ──────────────────────────────────────────────────────────────────────────────*/
@@ -116,11 +118,19 @@ string scalar _trop_get_plugin_path()
 
     plugin_name = _trop_get_plugin_name()
     if (plugin_name == "") return("")
+    platform_name = _trop_get_plugin_name_platform()
 
-    /* --- 1. findfile on adopath (covers net install / SSC) --- */
+    /* --- 1. findfile on adopath (covers SSC where g/h maps to trop.plugin) --- */
     (void) _stata("capture findfile " + plugin_name, 1)
     plugin_path = st_global("r(fn)")
     if (plugin_path != "" & fileexists(plugin_path)) return(plugin_path)
+
+    /* --- 1b. findfile platform name (GitHub: g/h not effective, original names) --- */
+    if (platform_name != "") {
+        (void) _stata("capture findfile " + platform_name, 1)
+        plugin_path = st_global("r(fn)")
+        if (plugin_path != "" & fileexists(plugin_path)) return(plugin_path)
+    }
 
     /* --- 2. Same dir as trop.ado (adopath-relative) --- */
     (void) _stata("capture findfile trop.ado", 1)
@@ -131,10 +141,15 @@ string scalar _trop_get_plugin_path()
         plugin_path = pkg_dir + plugin_name
         if (fileexists(plugin_path)) return(plugin_path)
 
+        /* GitHub install: platform-specific name alongside ado */
+        if (platform_name != "") {
+            plugin_path = pkg_dir + platform_name
+            if (fileexists(plugin_path)) return(plugin_path)
+        }
+
         /* dev layout: ado/ -> ../plugin/ */
         pkg_dir = subinstr(ado_path, "/ado/trop.ado", "", 1)
         if (pkg_dir != ado_path) {
-            platform_name = _trop_get_plugin_name_platform()
             if (platform_name != "") {
                 plugin_path = pkg_dir + "/plugin/" + platform_name
                 if (fileexists(plugin_path)) return(plugin_path)
@@ -144,7 +159,6 @@ string scalar _trop_get_plugin_path()
 
     /* --- 3. CWD-relative dev paths with platform-specific name --- */
     pwd = st_global("c(pwd)")
-    platform_name = _trop_get_plugin_name_platform()
     if (platform_name != "") {
         plugin_path = pwd + "/trop_stata/plugin/" + platform_name
         if (fileexists(plugin_path)) return(plugin_path)
@@ -156,17 +170,29 @@ string scalar _trop_get_plugin_path()
         if (fileexists(plugin_path)) return(plugin_path)
     }
 
-    /* --- 4. System directories --- */
+    /* --- 4. System directories (try both canonical and platform names) --- */
     sysdir_plus = st_global("c(sysdir_plus)")
     plugin_path = sysdir_plus + "t/" + plugin_name
     if (fileexists(plugin_path)) return(plugin_path)
+    if (platform_name != "") {
+        plugin_path = sysdir_plus + "t/" + platform_name
+        if (fileexists(plugin_path)) return(plugin_path)
+    }
 
     sysdir_personal = st_global("c(sysdir_personal)")
     plugin_path = sysdir_personal + plugin_name
     if (fileexists(plugin_path)) return(plugin_path)
+    if (platform_name != "") {
+        plugin_path = sysdir_personal + platform_name
+        if (fileexists(plugin_path)) return(plugin_path)
+    }
 
     plugin_path = pwd + "/" + plugin_name
     if (fileexists(plugin_path)) return(plugin_path)
+    if (platform_name != "") {
+        plugin_path = pwd + "/" + platform_name
+        if (fileexists(plugin_path)) return(plugin_path)
+    }
 
     return("")
 }
